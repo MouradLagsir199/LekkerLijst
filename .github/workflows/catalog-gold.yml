@@ -13,6 +13,16 @@ on:
         description: Required for status and finish stages.
         required: false
         type: string
+      segment:
+        description: Gold segment to start. Run one segment at a time to stay within the OpenAI queue limit.
+        required: true
+        default: "1"
+        type: string
+      segments:
+        description: Total number of gold segments.
+        required: true
+        default: "4"
+        type: string
 
 jobs:
   gold:
@@ -31,7 +41,7 @@ jobs:
         if: inputs.stage == 'start'
         run: |
           python scrapers/catalog_gold.py export --out data/catalog-gold/silver.json
-          python scrapers/catalog_gold.py prepare-batch --input data/catalog-gold/silver.json --requests data/catalog-gold/requests.jsonl --manifest data/catalog-gold/manifest.json
+          python scrapers/catalog_gold.py prepare-batch --input data/catalog-gold/silver.json --requests data/catalog-gold/requests.jsonl --manifest data/catalog-gold/manifest.json --segment "${{ inputs.segment }}" --segments "${{ inputs.segments }}"
           python scrapers/catalog_gold.py submit-batch --requests data/catalog-gold/requests.jsonl --metadata data/catalog-gold/batch.json
       - name: Check Batch API status
         if: inputs.stage == 'status'

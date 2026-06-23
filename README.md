@@ -68,4 +68,4 @@ gh secret set SUPABASE_URL --repo MouradLagsir199/LekkerLijst
 gh secret set SUPABASE_SERVICE_ROLE_KEY --repo MouradLagsir199/LekkerLijst
 ```
 
-The service-role key is used only by CI to write bronze/silver/gold catalog data; it is never exposed to the mobile app. Gold categorization and the AI match review call the service-role-protected `catalog-openai-bridge` Edge Function, so `OPENAI_API_KEY` remains configured only as a Supabase Function secret.
+The service-role key is used only by CI to write bronze/silver/gold catalog data; it is never exposed to the mobile app. Gold categorization and the AI match review call the service-role-protected `catalog-openai-bridge` Edge Function, so `OPENAI_API_KEY` remains configured only as a Supabase Function secret. Start the four gold segments one at a time, finish each completed Batch ID, then proceed to the next segment; this respects OpenAI's enqueued-token limit while preserving the same gold mapping behavior.

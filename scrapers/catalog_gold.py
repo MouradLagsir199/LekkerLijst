@@ -113,20 +113,40 @@ def make_request_body(group: list[dict[str, Any]], model: str) -> dict[str, Any]
     }
 
 
-def prepare_batch(input_path: Path, requests_path: Path, manifest_path: Path, model: str) -> None:
+def prepare_batch(
+    input_path: Path,
+    requests_path: Path,
+    manifest_path: Path,
+    model: str,
+    segment: int = 1,
+    segments: int = 1,
+) -> None:
     rows = read_json(input_path)
     if not isinstance(rows, list) or not rows:
         raise SystemExit("Input must be a non-empty exported silver JSON array.")
+    if not 1 <= segment <= segments:
+        raise SystemExit("segment must be between 1 and segments.")
+
+    all_groups = list(chunks(rows, GROUP_SIZE))
+    groups_per_segment = (len(all_groups) + segments - 1) // segments
+    first_group = (segment - 1) * groups_per_segment
+    selected_groups = all_groups[first_group : first_group + groups_per_segment]
+    if not selected_groups:
+        raise SystemExit(f"Segment {segment} contains no catalog products.")
+
     manifest: dict[str, list[str]] = {}
     requests_path.parent.mkdir(parents=True, exist_ok=True)
     with requests_path.open("w", encoding="utf-8") as handle:
-        for index, group in enumerate(chunks(rows, GROUP_SIZE), start=1):
-            custom_id = f"catalog-group-{index:05d}"
+        for group_index, group in enumerate(selected_groups, start=first_group + 1):
+            custom_id = f"catalog-segment-{segment:02d}-group-{group_index:05d}"
             manifest[custom_id] = [row["id"] for row in group]
             request = {"custom_id": custom_id, "method": "POST", "url": "/v1/responses", "body": make_request_body(group, model)}
             handle.write(json.dumps(request, ensure_ascii=False) + "\n")
     write_json(manifest_path, manifest)
-    print(f"Prepared {len(manifest)} Batch API requests for {len(rows)} silver products.")
+    print(
+        f"Prepared segment {segment}/{segments}: {len(manifest)} Batch API requests "
+        f"for {sum(len(group) for group in selected_groups)} of {len(rows)} silver products."
+    )
 
 
 def openai_headers() -> dict[str, str]:
@@ -392,6 +412,8 @@ def main() -> None:
     prepare_parser.add_argument("--requests", type=Path, required=True)
     prepare_parser.add_argument("--manifest", type=Path, required=True)
     prepare_parser.add_argument("--model", default=os.environ.get("OPENAI_CATALOG_MODEL", "gpt-5.4-mini"))
+    prepare_parser.add_argument("--segment", type=int, default=1)
+    prepare_parser.add_argument("--segments", type=int, default=1)
 
     submit_parser = subparsers.add_parser("submit-batch")
     submit_parser.add_argument("--requests", type=Path, required=True)
@@ -419,7 +441,7 @@ def main() -> None:
     if args.command == "export":
         export_current_silver(args.out, args.limit)
     elif args.command == "prepare-batch":
-        prepare_batch(args.input, args.requests, args.manifest, args.model)
+        prepare_batch(args.input, args.requests, args.manifest, args.model, args.segment, args.segments)
     elif args.command == "submit-batch":
         submit_batch(args.requests, args.metadata)
     elif args.command == "status":

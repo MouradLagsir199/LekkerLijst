@@ -69,6 +69,29 @@ class CatalogGoldTests(unittest.TestCase):
             parse_batch(output_path, mappings_path)
             self.assertEqual(read_json(mappings_path)[0]["canonicalName"], "boter")
 
+    def test_prepares_a_non_overlapping_catalog_segment(self) -> None:
+        products = [
+            {"id": f"silver-{index}", "name": f"Product {index}", "brand": None, "category": None, "subcategory": None, "package_size_text": None}
+            for index in range(161)
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            input_path = root / "silver.json"
+            request_path = root / "requests.jsonl"
+            manifest_path = root / "manifest.json"
+            input_path.write_text(json.dumps(products), encoding="utf-8")
+
+            prepare_batch(input_path, request_path, manifest_path, "gpt-5.4-mini", segment=2, segments=2)
+
+            requests = [json.loads(line) for line in request_path.read_text(encoding="utf-8").splitlines()]
+            product_ids = {
+                product["silverProductId"]
+                for request in requests
+                for product in json.loads(request["body"]["input"][1]["content"])
+            }
+            self.assertEqual(product_ids, {"silver-160"})
+            self.assertTrue(all(request["custom_id"].startswith("catalog-segment-02-") for request in requests))
+
 
 def read_json(path: Path):
     return json.loads(path.read_text(encoding="utf-8"))
