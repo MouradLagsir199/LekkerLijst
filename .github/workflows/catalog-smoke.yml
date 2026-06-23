@@ -27,3 +27,6 @@ jobs:
       - name: Test PLUS version recovery
         working-directory: Plus
         run: python -m unittest test_plus_scraper.py
+      - name: Test Jumbo transient retry
+        working-directory: Jumbo
+        run: python -m unittest test_jumbo_scraper.py

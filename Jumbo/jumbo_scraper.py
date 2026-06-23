@@ -398,6 +398,14 @@ async def graphql_request(
             errors = data.get("errors") or []
             if errors and not data.get("data"):
                 messages = "; ".join(str(error.get("message", error)) for error in errors)
+                if re.search(r"\b(?:429|5\d\d)\b", messages) and attempt < retries:
+                    print(
+                        f"  transient GraphQL response on {operation_name}: {messages}; "
+                        f"retry {attempt}/{retries} in {backoff:.1f}s"
+                    )
+                    await asyncio.sleep(backoff)
+                    backoff *= 2
+                    continue
                 raise RuntimeError(f"GraphQL {operation_name} failed: {messages}")
             if errors:
                 messages = "; ".join(str(error.get("message", error)) for error in errors)
@@ -842,7 +850,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--query", default=None, help="Keyword search instead of the root catalog")
     parser.add_argument("--limit", type=int, default=None, help="Limit SKUs for testing")
     parser.add_argument("--out", default=str(DEFAULT_OUT), help="Output CSV path")
-    parser.add_argument("--concurrency", type=int, default=6, help="Simultaneous GraphQL requests")
+    parser.add_argument("--concurrency", type=int, default=6, help="Simultaneous GraphQL requests; use 1 for a hosted CI runner")
     parser.add_argument("--detail-batch-size", type=int, default=50, help="SKUs per details request")
     parser.add_argument("--checkpoint-every", type=int, default=10, help="Detail batches between CSV saves")
     parser.add_argument("--no-details", action="store_true", help="Only save product-list fields")
