@@ -10,6 +10,11 @@ export type RankableProduct = {
   isAvailable: boolean;
 };
 
+export type ScoredProductCandidate = {
+  currentPriceCents: number | null;
+  matchScore: number | null;
+};
+
 export function tokenOverlapScore(query: string, productName: string): number {
   const queryTokens = new Set(normalizeIngredientName(query).split(" ").filter(Boolean));
   const productTokens = new Set(normalizeIngredientName(productName).split(" ").filter(Boolean));
@@ -44,4 +49,24 @@ export function scoreProductForIngredient(input: {
   }
 
   return Math.max(0, Number(score.toFixed(4)));
+}
+
+/**
+ * Picks the cheapest product only after excluding loosely-related fuzzy matches.
+ * The database returns candidates ordered by relevance; this keeps options within
+ * a small score band of the best result before comparing their shelf prices.
+ */
+export function selectLowestPricedRelevantProduct<T extends ScoredProductCandidate>(candidates: T[]): T | null {
+  const valid = candidates.filter((candidate) => Number.isFinite(candidate.matchScore) && Number.isFinite(candidate.currentPriceCents));
+  if (!valid.length) return null;
+
+  const bestScore = Math.max(...valid.map((candidate) => candidate.matchScore ?? 0));
+  const relevanceFloor = Math.max(0.35, bestScore - 0.15);
+  const relevant = valid.filter((candidate) => (candidate.matchScore ?? 0) >= relevanceFloor);
+
+  return [...relevant].sort(
+    (left, right) =>
+      (left.currentPriceCents ?? Number.MAX_SAFE_INTEGER) - (right.currentPriceCents ?? Number.MAX_SAFE_INTEGER) ||
+      (right.matchScore ?? 0) - (left.matchScore ?? 0)
+  )[0] ?? null;
 }

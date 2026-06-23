@@ -46,7 +46,7 @@ npm run start --workspace apps/mobile
 ## Notes
 
 - Product matching starts with seeded AH/Jumbo/Dirk/PLUS products and a Postgres `pg_trgm` search function. The default selected product is the lowest-priced relevant option; every item can show stores and variants.
-- Link import reads public page metadata, JSON-LD Recipe data, and available TikTok/Pinterest oEmbed metadata. Pinterest follows a pin to its original recipe page. Instagram/Facebook post links use configured Apify actors for post captions/text. Instagram Reels and TikTok video links add a transcript pass after metadata; detected Facebook video links do the same. Media is never downloaded or stored.
+- Link import reads public page metadata, JSON-LD Recipe data, and available TikTok/Pinterest oEmbed metadata. Pinterest follows a pin to its original recipe page and uses a dedicated Pin actor for the correct card thumbnail, direct video metadata, and native captions. If the written source is incomplete, a public Pinterest video can be transcribed only when it is at most five minutes; media is never stored. Instagram/Facebook post links use configured Apify actors for post captions/text. Instagram Reels and TikTok video links add a transcript pass after metadata; detected Facebook video links do the same.
 - Imports stay faithful to their source. Missing quantities, servings, ingredients, or cut-off steps result in an explicit incomplete recipe concept. AI can create a clearly labelled completion proposal, which the user must review and accept; incomplete concepts cannot add items to a shopping list.
 - Source thumbnails are saved as recipe-card images when a source exposes them. Imports generate Dutch titles, descriptions, ingredients, preparation text, and filter tags.
 - Recipe ingredients are added individually to a shopping list scheduled for a chosen day. The Boodschappen tab includes upcoming lists and a calendar; product check-off happens only in a list detail screen. Planning supports editable week-by-week lunch and dinner slots using saved recipes or manual meals.
@@ -58,6 +58,8 @@ The store-specific extractors remain in `AH/`, `Jumbo/`, `Dirk/`, and `Plus/`. `
 1. Existing scraper CSV -> immutable Storage artifact plus `scrape_runs`, `bronze_artifacts`, and `bronze_products`.
 2. Standardized store columns -> `silver_products` with current price, availability, package, image, and promotion fields.
 3. One OpenAI Batch categorization -> `canonical_ingredients`, aliases, mapping provenance, and final `products` used by the app.
+
+After the gold Batch has been applied, run the manual `Catalog Match Evaluation` workflow. It verifies representative Dutch ingredients against the live `search_products` RPC, confirms the auto-selection is the lowest-priced product within the strongest relevance band, and uses one structured AI review of only those visible candidates. Both reports are retained as the workflow artifact.
 
 `Catalog Ingest` runs daily in GitHub Actions and can be started for one store. `Catalog Gold Categorization` is intentionally manual because it creates one paid Batch API job. Before enabling those workflows, add these GitHub repository secrets:
 

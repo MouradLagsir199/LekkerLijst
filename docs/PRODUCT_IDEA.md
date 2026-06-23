@@ -33,6 +33,7 @@ Implemented first:
 - Source thumbnails on recipe cards, Dutch AI-generated recipe tags, platform attribution, and tag filtering.
 - Week-by-week planning with editable lunch/dinner slots, imported recipes, and manual meals.
 - Bronze/silver/gold catalog schema plus GitHub Actions ingestion and one-time OpenAI Batch categorization tooling.
+- A post-gold catalog evaluation workflow: deterministic search-quality checks plus a bounded structured AI review of visible product alternatives.
 
 Important rule:
 
@@ -53,7 +54,7 @@ Important rule:
 
 3. Strengthen social link imports.
    - Link import uses public metadata, JSON-LD Recipe data, and TikTok/Pinterest oEmbed where available.
-   - Pinterest follows the pin to its public source recipe page.
+- Pinterest follows the pin to its public source recipe page and also reads Pin-level thumbnail, caption, and video metadata through Apify. Native captions are preferred; a public video gets a bounded transcription only when its written recipe data is incomplete.
    - Instagram and Facebook post links use dedicated Apify actors for title/caption extraction before recipe parsing.
    - Instagram Reels and TikTok video links use transcript actors after caption/metadata extraction. Recipes remain incomplete when the combined source omits quantities or steps.
    - User-initiated share sheet for iOS and Android remains deferred.

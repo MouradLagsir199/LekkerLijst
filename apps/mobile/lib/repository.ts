@@ -1,4 +1,4 @@
-import type { ParsedIngredient, ParsedInstruction, ParsedRecipe } from "@recipe-nl/shared";
+import { selectLowestPricedRelevantProduct, type ParsedIngredient, type ParsedInstruction, type ParsedRecipe } from "@recipe-nl/shared";
 
 type SupabaseLike = {
   from: (table: string) => any;
@@ -146,11 +146,13 @@ export async function addRecipeIngredientToScheduledShoppingList(input: {
   if (matchError) throw matchError;
 
   const match = Array.isArray(matches)
-    ? [...matches].sort(
-        (left, right) =>
-          (left.current_price_cents ?? Number.MAX_SAFE_INTEGER) - (right.current_price_cents ?? Number.MAX_SAFE_INTEGER) ||
-          (right.match_score ?? 0) - (left.match_score ?? 0)
-      )[0]
+    ? selectLowestPricedRelevantProduct(
+        matches.map((candidate: any) => ({
+          ...candidate,
+          currentPriceCents: candidate.current_price_cents,
+          matchScore: candidate.match_score
+        }))
+      )
     : null;
   const { count, error: countError } = await supabase
     .from("shopping_list_items")

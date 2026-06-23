@@ -23,4 +23,7 @@ jobs:
         run: pip install -r scrapers/requirements.txt
       - name: Test normalizer
         working-directory: scrapers
-        run: python -m unittest test_catalog_pipeline.py test_catalog_gold.py
+        run: python -m unittest test_catalog_pipeline.py test_catalog_gold.py test_catalog_match_eval.py
+      - name: Test PLUS version recovery
+        working-directory: Plus
+        run: python -m unittest test_plus_scraper.py

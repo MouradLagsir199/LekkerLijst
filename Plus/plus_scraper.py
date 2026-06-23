@@ -34,9 +34,9 @@ from curl_cffi import requests as cc
 # If you see 403 "Invalid Login", grab a fresh one from your browser cookies.
 CSRF_TOKEN = "T6C+9iB49TLra4jEsMeSckDMNhQ="
 
-# OutSystems version tokens. Also stable until a deploy. moduleVersion is global,
-# apiVersion is per-endpoint. If versions are stale, OutSystems returns
-# "hasModuleVersionChanged": true in the response and refuses to serve.
+# OutSystems version tokens. `moduleVersion` is refreshed automatically from
+# Plus's public manifest if the server reports a deploy. `apiVersion` is
+# endpoint-specific and must still be updated if PLUS changes an action.
 MODULE_VERSION         = "aYUiHBQTI6MJSUYDwYY6gQ"
 API_VERSION_LIST       = "cafT+CKg7ockKx+9Kx_BsQ"
 API_VERSION_DETAIL     = "CDRjyW8mae+R63Y3xIWPrQ"
@@ -54,6 +54,7 @@ URL_PRODUCT_DETAIL = (BASE_URL +
 URL_MENU_CATEGORIES = (BASE_URL +
     "/screenservices/ECP_Product_CW/Categories/CategoryList_TF"
     "/DataActionGetMenuCategories")
+URL_MODULE_VERSION = BASE_URL + "/moduleservices/moduleversioninfo"
 
 CATEGORY_SLUGS_FALLBACK = [
     "aardappelen-groente-fruit",
@@ -279,8 +280,38 @@ def build_detail_payload(slug: str) -> dict:
 
 # ─── HTTP ─────────────────────────────────────────────────────────────────────
 
+def refresh_module_version(session: cc.Session) -> bool:
+    """Fetch Plus's current global OutSystems module token after a deploy."""
+    global MODULE_VERSION
+    try:
+        response = session.get(
+            URL_MODULE_VERSION,
+            headers={
+                "User-Agent": HEADERS["User-Agent"],
+                "Accept": "application/json",
+                "OutSystems-client-env": "browser",
+            },
+            params={"cache_buster": str(int(time.time() * 1000))},
+            timeout=20,
+        )
+        response.raise_for_status()
+        token = str(response.json().get("versionToken") or "").strip()
+    except Exception as exc:
+        print(f"  Could not refresh PLUS module version: {exc!r}")
+        return False
+
+    if not token:
+        print("  PLUS module version response did not contain a versionToken.")
+        return False
+    if token != MODULE_VERSION:
+        MODULE_VERSION = token
+        print("  Refreshed PLUS module version from the live manifest.")
+        return True
+    return False
+
+
 def post(session: cc.Session, url: str, payload: dict, referer: str,
-         retries: int = 3) -> dict | None:
+         retries: int = 3, allow_version_refresh: bool = True) -> dict | None:
     headers = {**HEADERS, "Referer": referer}
     backoff = 2.0
     for attempt in range(1, retries + 1):
@@ -305,10 +336,19 @@ def post(session: cc.Session, url: str, payload: dict, referer: str,
                 continue
             r.raise_for_status()
             data = r.json()
-            # Check for version drift
+            # A fresh `moduleVersion` is available from the public manifest. Retry
+            # once with it so scheduled catalog runs do not silently use stale data.
             vi = data.get("versionInfo", {})
-            if vi.get("hasModuleVersionChanged") or vi.get("hasApiVersionChanged"):
-                print(f"  WARNING: versions stale. Update MODULE_VERSION / API_VERSION_* constants.")
+            if vi.get("hasModuleVersionChanged") and allow_version_refresh and refresh_module_version(session):
+                version_info = payload.get("versionInfo")
+                if isinstance(version_info, dict):
+                    version_info["moduleVersion"] = MODULE_VERSION
+                return post(session, url, payload, referer, retries=1, allow_version_refresh=False)
+            if vi.get("hasModuleVersionChanged"):
+                print("  WARNING: PLUS module version is stale and could not be refreshed automatically.")
+                print(f"  Response versionInfo: {vi}")
+            if vi.get("hasApiVersionChanged"):
+                print("  WARNING: PLUS API version is stale. Update API_VERSION_* constants before a full run.")
                 print(f"  Response versionInfo: {vi}")
             return data
         except Exception as exc:

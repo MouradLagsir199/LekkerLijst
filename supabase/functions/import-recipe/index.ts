@@ -6,6 +6,8 @@ const corsHeaders = {
 
 const MAX_SOCIAL_VIDEO_SECONDS = 5 * 60;
 const UNIVERSAL_SOCIAL_TRANSCRIPT_ACTOR = "CVQmx5Se22zxPaWc1";
+const PINTEREST_MEDIA_ACTOR = "PQu1LW4FWyPQFFX8F";
+const DIRECT_MEDIA_TRANSCRIPT_ACTOR = "VZTENHFJOyJEGIKCv";
 
 const recipeJsonSchema = {
   type: "object",
@@ -154,6 +156,25 @@ type PageMetadata = {
 };
 
 type ApifyInstagramPost = Record<string, unknown>;
+
+type PinterestMedia = {
+  canonicalUrl?: string;
+  linkedRecipeUrl?: string;
+  title?: string;
+  description?: string;
+  imageUrl?: string;
+  siteName?: string;
+  videoUrl?: string;
+  captionsUrl?: string;
+  durationSeconds?: number;
+};
+
+type PinterestVideo = {
+  url: string;
+  thumbnailUrl?: string;
+  captionsUrl?: string;
+  durationSeconds?: number;
+};
 
 Deno.serve(async (request) => {
   if (request.method === "OPTIONS") {
@@ -390,13 +411,14 @@ async function collectLinkContext(url: string): Promise<LinkContext> {
 
   const platform = detectPlatform(url);
   const extractionWarnings: string[] = [];
-  const [pageResult, apifyResult] = await Promise.allSettled([
+  const [pageResult, apifyResult, pinterestResult] = await Promise.allSettled([
     fetchPageMetadata(url),
     platform === "instagram"
       ? fetchInstagramPostFromApify(url)
       : platform === "facebook"
         ? fetchFacebookPostFromApify(url)
-        : Promise.resolve(null)
+        : Promise.resolve(null),
+    platform === "pinterest" ? fetchPinterestMediaFromApify(url) : Promise.resolve(null)
   ]);
 
   const page = pageResult.status === "fulfilled" ? pageResult.value : null;
@@ -409,6 +431,11 @@ async function collectLinkContext(url: string): Promise<LinkContext> {
     extractionWarnings.push(apifyResult.reason?.message ?? "Apify post extraction failed");
   }
 
+  const pinterestMedia = pinterestResult.status === "fulfilled" ? pinterestResult.value : null;
+  if (pinterestResult.status === "rejected") {
+    extractionWarnings.push(pinterestResult.reason?.message ?? "Pinterest media extraction failed");
+  }
+
   const metadataUrl = page?.canonicalUrl ?? page?.finalUrl ?? url;
   let oembed: Record<string, unknown> | null = null;
   try {
@@ -418,7 +445,9 @@ async function collectLinkContext(url: string): Promise<LinkContext> {
   }
 
   let linkedRecipePage: PageMetadata | null = null;
-  const linkedRecipeUrl = platform === "pinterest" ? getSafeHttpUrl(page?.sourceRecipeUrl) : undefined;
+  const linkedRecipeUrl = platform === "pinterest"
+    ? getSafeHttpUrl(pinterestMedia?.linkedRecipeUrl ?? page?.sourceRecipeUrl)
+    : undefined;
   if (linkedRecipeUrl) {
     try {
       linkedRecipePage = await fetchPageMetadata(linkedRecipeUrl);
@@ -427,17 +456,19 @@ async function collectLinkContext(url: string): Promise<LinkContext> {
     }
   }
 
-  const title = pickString(apifyPost?.title, linkedRecipePage?.title, oembed?.title, page?.title);
+  const title = pickString(apifyPost?.title, linkedRecipePage?.title, pinterestMedia?.title, oembed?.title, page?.title);
   const description = pickString(
     apifyPost?.description,
     linkedRecipePage?.description,
+    pinterestMedia?.description,
     page?.description,
     oembed?.author_name,
     stripHtml(String(oembed?.html ?? ""))
   );
-  const siteName = pickString(apifyPost?.siteName, linkedRecipePage?.siteName, page?.siteName, oembed?.provider_name);
+  const siteName = pickString(apifyPost?.siteName, linkedRecipePage?.siteName, pinterestMedia?.siteName, page?.siteName, oembed?.provider_name);
   const imageUrl = pickImageUrl(
     apifyPost?.imageUrl,
+    pinterestMedia?.imageUrl,
     linkedRecipePage?.imageUrl,
     oembed?.thumbnail_url,
     page?.imageUrl
@@ -445,7 +476,7 @@ async function collectLinkContext(url: string): Promise<LinkContext> {
 
   const baseContext: LinkContext = {
     url,
-    canonicalUrl: apifyPost?.canonicalUrl ?? (metadataUrl !== url ? metadataUrl : undefined),
+    canonicalUrl: apifyPost?.canonicalUrl ?? pinterestMedia?.canonicalUrl ?? (metadataUrl !== url ? metadataUrl : undefined),
     linkedRecipeUrl,
     platform,
     title,
@@ -458,9 +489,11 @@ async function collectLinkContext(url: string): Promise<LinkContext> {
   };
 
   let transcript: string | undefined;
-  // Reels are video-first. Always combine their caption with a transcript so a short
-  // caption cannot hide the actual ingredients and preparation spoken in the video.
-  if (platform === "instagram" && (isInstagramReelUrl(url) || !hasUsableRecipeSignal(baseContext))) {
+  const needsTranscript = !hasLikelyCompleteRecipeSignal(baseContext);
+
+  // Always inspect captions and metadata before paying for transcription. This avoids
+  // processing a video when the post already contains a complete written recipe.
+  if (platform === "instagram" && needsTranscript && (isInstagramReelUrl(url) || !hasUsableRecipeSignal(baseContext))) {
     try {
       transcript = await fetchInstagramTranscriptFromApify(url);
     } catch (error) {
@@ -470,6 +503,7 @@ async function collectLinkContext(url: string): Promise<LinkContext> {
 
   if (
     !transcript &&
+    needsTranscript &&
     (platform === "tiktok" ||
       (platform === "facebook" &&
         (isFacebookVideoUrl(url) || isFacebookVideoUrl(metadataUrl) || !hasUsableRecipeSignal(baseContext))))
@@ -478,6 +512,23 @@ async function collectLinkContext(url: string): Promise<LinkContext> {
       transcript = await fetchUniversalSocialTranscriptFromApify(url, platform);
     } catch (error) {
       extractionWarnings.push(error instanceof Error ? error.message : `${platform} transcript extraction failed`);
+    }
+  }
+
+  if (!transcript && platform === "pinterest" && needsTranscript && pinterestMedia?.videoUrl) {
+    if (pinterestMedia.captionsUrl) {
+      try {
+        transcript = await fetchPublicCaptionTranscript(pinterestMedia.captionsUrl);
+      } catch (error) {
+        extractionWarnings.push(error instanceof Error ? error.message : "Pinterest captions extraction failed");
+      }
+    }
+    if (!transcript) {
+      try {
+        transcript = await fetchDirectMediaTranscriptFromApify(pinterestMedia);
+      } catch (error) {
+        extractionWarnings.push(error instanceof Error ? error.message : "Pinterest transcript extraction failed");
+      }
     }
   }
 
@@ -550,6 +601,33 @@ async function fetchFacebookPostFromApify(url: string): Promise<PageMetadata> {
   };
 }
 
+async function fetchPinterestMediaFromApify(url: string): Promise<PinterestMedia> {
+  const items = await runApifyActor(PINTEREST_MEDIA_ACTOR, {
+    startUrls: [{ url }]
+  }, { maxTotalChargeUsd: "0.03" });
+  if (!Array.isArray(items) || !isRecord(items[0])) {
+    throw new Error("Apify returned no Pinterest pin data");
+  }
+
+  const pin = items[0];
+  const description = pickPostText(pin, "description", "text", "caption");
+  const user = getPostRecord(pin, "user");
+  const ownerName = user ? pickPostText(user, "fullName", "username") : undefined;
+  const video = findPinterestVideo(pin.videos);
+
+  return {
+    canonicalUrl: pickPostText(pin, "url") ?? url,
+    linkedRecipeUrl: getSafeHttpUrl(pickPostText(pin, "trackedLink", "link", "sourceUrl")),
+    title: pickPostText(pin, "title", "name") ?? (description ? postTitle(description, "Pinterest", ownerName) : undefined),
+    description,
+    imageUrl: video?.thumbnailUrl ?? pickLargestImageUrl(pin.images) ?? pickPostImage(pin),
+    siteName: ownerName ? `Pinterest - ${ownerName}` : "Pinterest",
+    videoUrl: video?.url,
+    captionsUrl: video?.captionsUrl,
+    durationSeconds: video?.durationSeconds
+  };
+}
+
 async function fetchInstagramTranscriptFromApify(url: string) {
   const items = await runApifyActor("S9A11NvceWaGorwwh", { videoUrl: url });
   if (!Array.isArray(items) || !isRecord(items[0])) {
@@ -588,10 +666,61 @@ async function fetchUniversalSocialTranscriptFromApify(url: string, platform: "t
   return transcript.slice(0, 12_000);
 }
 
+async function fetchDirectMediaTranscriptFromApify(media: PinterestMedia) {
+  if (!media.videoUrl) {
+    throw new Error("Pinterest did not expose a usable video URL for transcription.");
+  }
+  if (media.durationSeconds === undefined) {
+    throw new Error("Pinterest did not expose the video duration, so transcription was skipped to protect import costs.");
+  }
+  if (media.durationSeconds > MAX_SOCIAL_VIDEO_SECONDS) {
+    throw new Error("Deze video is langer dan 5 minuten en kan niet worden getranscribeerd.");
+  }
+
+  const items = await runApifyActor(
+    DIRECT_MEDIA_TRANSCRIPT_ACTOR,
+    {
+      mediaUrl: media.videoUrl,
+      maxAudioMinutes: 5,
+      diarize: false,
+      smartFormat: true
+    },
+    { maxTotalChargeUsd: "0.25", timeoutSeconds: 180 }
+  );
+  if (!Array.isArray(items) || !isRecord(items[0])) {
+    throw new Error("Apify returned no Pinterest transcript data");
+  }
+
+  const item = items[0];
+  const duration = pickNumber(item, "durationSeconds", "duration", "durationSec", "videoDuration");
+  if (duration !== undefined && duration > MAX_SOCIAL_VIDEO_SECONDS) {
+    throw new Error("Deze video is langer dan 5 minuten en kan niet worden getranscribeerd.");
+  }
+
+  const transcript = pickTranscriptText(item);
+  if (!transcript || transcript.length < 40) {
+    throw new Error("Apify returned a Pinterest video without a usable transcript");
+  }
+
+  return transcript.slice(0, 12_000);
+}
+
+async function fetchPublicCaptionTranscript(url: string) {
+  const captionUrl = getSafeHttpUrl(url);
+  if (!captionUrl) throw new Error("Pinterest returned an invalid captions URL");
+
+  const response = await fetch(captionUrl, { headers: { Accept: "text/vtt,text/plain,application/xml;q=0.9,*/*;q=0.8" } });
+  if (!response.ok) throw new Error(`Pinterest captions failed with HTTP ${response.status}`);
+
+  const transcript = subtitleText(await response.text());
+  if (transcript.length < 40) throw new Error("Pinterest captions did not contain usable spoken text");
+  return transcript.slice(0, 12_000);
+}
+
 async function runApifyActor(
   actorId: string,
   input: Record<string, unknown>,
-  options: { maxTotalChargeUsd?: string } = {}
+  options: { maxTotalChargeUsd?: string; timeoutSeconds?: number } = {}
 ) {
   const token = Deno.env.get("APIFY_API_TOKEN");
   if (!token) {
@@ -602,7 +731,7 @@ async function runApifyActor(
   endpoint.searchParams.set("token", token);
   endpoint.searchParams.set("format", "json");
   endpoint.searchParams.set("clean", "true");
-  endpoint.searchParams.set("timeout", "120");
+  endpoint.searchParams.set("timeout", String(options.timeoutSeconds ?? 120));
   endpoint.searchParams.set("maxPaidDatasetItems", "1");
   if (options.maxTotalChargeUsd) endpoint.searchParams.set("maxTotalChargeUsd", options.maxTotalChargeUsd);
 
@@ -671,6 +800,110 @@ function pickNumber(item: ApifyInstagramPost, ...keys: string[]) {
     }
   }
   return undefined;
+}
+
+function findPinterestVideo(value: unknown, inheritedDuration?: number): PinterestVideo | undefined {
+  const candidates: PinterestVideo[] = [];
+
+  const visit = (node: unknown, durationFromParent?: number, depth = 0) => {
+    if (depth > 5 || !node) return;
+    if (Array.isArray(node)) {
+      node.forEach((item) => visit(item, durationFromParent, depth + 1));
+      return;
+    }
+    if (!isRecord(node)) return;
+
+    const duration = pinterestDurationSeconds(node) ?? durationFromParent;
+    const directUrl = pickPostText(node, "url", "videoUrl", "mediaUrl", "src");
+    if (directUrl && isDirectMediaUrl(directUrl)) {
+      candidates.push({
+        url: directUrl,
+        thumbnailUrl: pickImageUrl(node.thumbnail, node.image, node.poster),
+        captionsUrl: findCaptionUrl(node.captionsUrls ?? node.captionUrls ?? node.subtitles),
+        durationSeconds: duration
+      });
+    }
+
+    Object.values(node).forEach((child) => visit(child, duration, depth + 1));
+  };
+
+  visit(value, inheritedDuration);
+  return candidates
+    .sort((left, right) => {
+      const leftPriority = left.url.includes(".mp4") ? 2 : 1;
+      const rightPriority = right.url.includes(".mp4") ? 2 : 1;
+      return rightPriority - leftPriority;
+    })
+    .at(0);
+}
+
+function pinterestDurationSeconds(value: Record<string, unknown>) {
+  const duration = pickNumber(value, "durationSeconds", "durationSec", "duration", "videoDuration", "lengthSeconds");
+  if (duration === undefined || duration < 0) return undefined;
+  // Pinterest video metadata uses milliseconds; other actors typically use seconds.
+  return duration > 1_000 ? duration / 1_000 : duration;
+}
+
+function isDirectMediaUrl(value: string) {
+  try {
+    const path = new URL(value).pathname.toLowerCase();
+    return /\.(mp4|webm|mov|mkv|m4a|mp3|wav|ogg)$/.test(path);
+  } catch {
+    return false;
+  }
+}
+
+function findCaptionUrl(value: unknown, depth = 0): string | undefined {
+  if (depth > 4 || !value) return undefined;
+  if (typeof value === "string") return getSafeHttpUrl(value);
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const url = findCaptionUrl(item, depth + 1);
+      if (url) return url;
+    }
+  }
+  if (isRecord(value)) {
+    for (const item of Object.values(value)) {
+      const url = findCaptionUrl(item, depth + 1);
+      if (url) return url;
+    }
+  }
+  return undefined;
+}
+
+function pickLargestImageUrl(value: unknown): string | undefined {
+  if (!Array.isArray(value)) return findImageUrl(value);
+
+  const images = value
+    .filter(isRecord)
+    .map((image) => ({
+      url: pickImageUrl(image.url, image.src),
+      width: pickNumber(image, "width") ?? 0,
+      height: pickNumber(image, "height") ?? 0
+    }))
+    .filter((image): image is { url: string; width: number; height: number } => Boolean(image.url))
+    .sort((left, right) => right.width * right.height - left.width * left.height);
+
+  return images[0]?.url;
+}
+
+function subtitleText(raw: string) {
+  const lines = raw.replace(/\r/g, "").split("\n");
+  const uniqueLines: string[] = [];
+  let previous = "";
+
+  for (const line of lines) {
+    const cleaned = decodeHtml(stripHtml(line.replace(/<[^>]+>/g, " "))).trim();
+    if (!cleaned) continue;
+    if (/^(WEBVTT|NOTE|STYLE|REGION)\b/i.test(cleaned)) continue;
+    if (/^\d+$/.test(cleaned)) continue;
+    if (/^\d{1,2}:\d{2}(?::\d{2})?[.,]\d{3}\s+-->/.test(cleaned)) continue;
+    if (cleaned === previous) continue;
+    uniqueLines.push(cleaned);
+    previous = cleaned;
+  }
+
+  return uniqueLines.join(" ").replace(/\s+/g, " ").trim();
 }
 
 function pickPostImage(post: ApifyInstagramPost) {
@@ -774,6 +1007,29 @@ function hasUsableRecipeSignal(context: LinkContext) {
   if (text.length < 80) return false;
 
   return /\b(ingredients?|ingredienten|directions?|bereiding|instructions?|stappen|tbsp|tsp|cups?|gram|g\b|ml\b|eieren)\b/i.test(text);
+}
+
+function hasLikelyCompleteRecipeSignal(context: LinkContext) {
+  if (isSocialLoginPage(context)) return false;
+
+  if (
+    context.recipes.some(
+      (recipe) => (recipe.recipeIngredient?.length ?? 0) > 0 && (recipe.recipeInstructions?.length ?? 0) > 0
+    )
+  ) {
+    return true;
+  }
+
+  const text = [context.title, context.description, context.oembed ? formatOembed(context.oembed) : ""]
+    .filter(Boolean)
+    .join(" ")
+    .trim();
+  if (text.length < 120) return false;
+
+  const hasIngredientList = /\b(ingredients?|ingredienten|benodigdheden)\b/i.test(text);
+  const hasInstruction = /\b(stap(?:pen)?|bereid(?:ing|en)?|instructions?|directions?|kook|bak|meng|voeg|verwarm|roer)\b/i.test(text);
+  const hasQuantity = /\b\d+(?:[.,]\d+)?\s*(?:g|kg|ml|cl|dl|l|el|tl|tbsp|tsp|cups?|eieren?|stuks?)\b/i.test(text);
+  return hasIngredientList && hasInstruction && hasQuantity;
 }
 
 function missingRecipeSignalDetails(context: LinkContext) {

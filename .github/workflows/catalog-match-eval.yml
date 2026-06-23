@@ -1,0 +1,28 @@
+name: Catalog Match Evaluation
+
+on:
+  workflow_dispatch:
+
+jobs:
+  evaluate:
+    runs-on: ubuntu-latest
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      OPENAI_EVAL_MODEL: gpt-5.4-mini
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r scrapers/requirements.txt
+      - name: Evaluate database ranking and selected alternatives
+        run: python scrapers/catalog_match_eval.py evaluate --out data/catalog-eval/deterministic.json --min-pass-rate 0.8
+      - name: Review visible alternatives with OpenAI
+        run: python scrapers/catalog_match_eval.py ai-review --report data/catalog-eval/deterministic.json --out data/catalog-eval/ai-review.json --min-pass-rate 0.8
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: catalog-match-evaluation
+          path: data/catalog-eval

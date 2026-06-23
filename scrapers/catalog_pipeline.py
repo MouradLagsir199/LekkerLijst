@@ -112,6 +112,15 @@ class SupabaseApi:
             headers={"Content-Type": "application/json", "Prefer": "return=minimal"},
         )
 
+    def rpc(self, function: str, arguments: dict[str, Any]) -> Any:
+        response = self._request(
+            "POST",
+            f"rest/v1/rpc/{function}",
+            json_body=arguments,
+            headers={"Content-Type": "application/json"},
+        )
+        return response.json()
+
     def upload(self, storage_path: str, content: bytes, content_type: str) -> None:
         self._request(
             "POST",

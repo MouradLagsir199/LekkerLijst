@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { scoreProductForIngredient } from "../src/productMatching";
+import { scoreProductForIngredient, selectLowestPricedRelevantProduct } from "../src/productMatching";
 
 describe("product matching", () => {
   it("rewards lexical overlap and preferred store", () => {
@@ -45,5 +45,19 @@ describe("product matching", () => {
     });
 
     expect(score).toBeLessThan(1);
+  });
+
+  it("chooses the lowest price only among close relevance matches", () => {
+    const selected = selectLowestPricedRelevantProduct([
+      { currentPriceCents: 349, matchScore: 1.08, name: "kipfilet" },
+      { currentPriceCents: 299, matchScore: 0.98, name: "kipfilet aanbieding" },
+      { currentPriceCents: 119, matchScore: 0.44, name: "kippenbouillon" }
+    ]);
+
+    expect(selected?.name).toBe("kipfilet aanbieding");
+  });
+
+  it("returns no automatic match without a score and shelf price", () => {
+    expect(selectLowestPricedRelevantProduct([{ currentPriceCents: null, matchScore: 0.9 }])).toBeNull();
   });
 });
