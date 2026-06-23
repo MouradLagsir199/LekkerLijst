@@ -23,7 +23,6 @@ jobs:
       fail-fast: false
       matrix:
         store: [ah, jumbo, dirk, plus]
-    if: github.event_name == 'schedule' || inputs.store == 'all' || inputs.store == matrix.store
     env:
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
@@ -36,16 +35,17 @@ jobs:
       - name: Install scraper dependencies
         run: pip install -r scrapers/requirements.txt
       - name: Scrape AH
-        if: matrix.store == 'ah'
+        if: matrix.store == 'ah' && (github.event_name == 'schedule' || inputs.store == 'all' || inputs.store == matrix.store)
         run: python AH/ah_scraper.py --out data/raw/ah_products.csv --concurrency 6
       - name: Scrape Jumbo
-        if: matrix.store == 'jumbo'
+        if: matrix.store == 'jumbo' && (github.event_name == 'schedule' || inputs.store == 'all' || inputs.store == matrix.store)
         run: python Jumbo/jumbo_scraper.py --all --out data/raw/jumbo_products.csv --concurrency 6
       - name: Scrape Dirk
-        if: matrix.store == 'dirk'
+        if: matrix.store == 'dirk' && (github.event_name == 'schedule' || inputs.store == 'all' || inputs.store == matrix.store)
         run: python Dirk/dirk_scraper.py --all --out data/raw/dirk_products.csv --concurrency 6
       - name: Scrape PLUS
-        if: matrix.store == 'plus'
+        if: matrix.store == 'plus' && (github.event_name == 'schedule' || inputs.store == 'all' || inputs.store == matrix.store)
         run: python Plus/plus_scraper.py --all --out data/raw/plus_products.csv --concurrency 6
       - name: Upload bronze and write silver
+        if: github.event_name == 'schedule' || inputs.store == 'all' || inputs.store == matrix.store
         run: python scrapers/catalog_pipeline.py ingest --store ${{ matrix.store }} --csv data/raw/${{ matrix.store }}_products.csv
