@@ -95,10 +95,7 @@ def system_prompt() -> str:
 
 def mapping_schema_for_group(group_size: int) -> dict[str, Any]:
     schema = json.loads(json.dumps(MAPPING_SCHEMA))
-    mappings = schema["properties"]["mappings"]
-    mappings["minItems"] = group_size
-    mappings["maxItems"] = group_size
-    mappings["items"]["properties"]["itemIndex"]["maximum"] = group_size - 1
+    schema["properties"]["mappings"]["items"]["properties"]["itemIndex"]["maximum"] = group_size - 1
     return schema
 
 
@@ -330,9 +327,6 @@ def parse_batch(batch_output_path: Path, mappings_path: Path, manifest_path: Pat
                     break
                 item_indexes.add(item_index)
                 mapped_response.append({**mapping, "silverProductId": source_ids[item_index]})
-            if mapped_response and item_indexes != set(range(len(source_ids))):
-                failures.append(record)
-                mapped_response = []
             mappings.extend(mapped_response)
         except json.JSONDecodeError:
             failures.append(record)
