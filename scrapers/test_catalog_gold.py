@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from catalog_gold import parse_batch, post_openai_response, prepare_batch
+from catalog_gold import parse_batch, post_openai_response, prepare_batch, valid_mappings
 
 
 class CatalogGoldTests(unittest.TestCase):
@@ -91,6 +91,18 @@ class CatalogGoldTests(unittest.TestCase):
             }
             self.assertEqual(product_ids, {"silver-160"})
             self.assertTrue(all(request["custom_id"].startswith("catalog-segment-02-") for request in requests))
+
+    def test_discards_duplicate_and_unknown_silver_mappings(self) -> None:
+        valid = valid_mappings(
+            [
+                {"silverProductId": "silver-1", "canonicalName": "boter"},
+                {"silverProductId": "silver-1", "canonicalName": "margarine"},
+                {"silverProductId": "unknown", "canonicalName": "olie"},
+                {"silverProductId": "silver-2", "canonicalName": ""},
+            ],
+            {"silver-1": {"id": "silver-1"}, "silver-2": {"id": "silver-2"}},
+        )
+        self.assertEqual(valid, [{"silverProductId": "silver-1", "canonicalName": "boter"}])
 
 
 def read_json(path: Path):

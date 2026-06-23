@@ -23,6 +23,7 @@ from catalog_pipeline import SupabaseApi, env_or_fail
 
 OPENAI_URL = "https://api.openai.com/v1"
 GROUP_SIZE = 80
+GOLD_WRITE_BATCH_SIZE = 250
 
 MAPPING_SCHEMA = {
     "type": "object",
@@ -315,26 +316,42 @@ def current_silver_rows() -> dict[str, dict[str, Any]]:
     return {row["id"]: row for row in rows}
 
 
+def valid_mappings(mappings: list[dict[str, Any]], source_rows: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep one AI mapping per silver product before upserting the gold layer."""
+    unique: dict[str, dict[str, Any]] = {}
+    for mapping in mappings:
+        silver_product_id = mapping.get("silverProductId")
+        if (
+            isinstance(silver_product_id, str)
+            and silver_product_id in source_rows
+            and isinstance(mapping.get("canonicalName"), str)
+            and mapping["canonicalName"].strip()
+        ):
+            unique.setdefault(silver_product_id, mapping)
+    return list(unique.values())
+
+
 def apply_gold(input_path: Path | None, mappings_path: Path) -> None:
     source_rows = {row["id"]: row for row in read_json(input_path)} if input_path else current_silver_rows()
     mappings = read_json(mappings_path)
     if not isinstance(mappings, list):
         raise SystemExit("Mappings must be a JSON array created by parse-batch.")
-    valid = [
-        mapping
-        for mapping in mappings
-        if mapping.get("silverProductId") in source_rows and isinstance(mapping.get("canonicalName"), str)
-    ]
+    valid = valid_mappings(mappings, source_rows)
     if not valid:
         raise SystemExit("No valid mappings match the exported silver input.")
+    duplicate_count = len(mappings) - len(valid)
+    if duplicate_count:
+        print(f"Ignored {duplicate_count} duplicate or invalid AI mappings before promotion.")
 
     api = SupabaseApi(env_or_fail("SUPABASE_URL"), env_or_fail("SUPABASE_SERVICE_ROLE_KEY"))
     canonical_rows: dict[str, dict[str, Any]] = {}
     for mapping in valid:
         canonical_name = normalized_name(mapping["canonicalName"])
         canonical_rows[canonical_name] = {"canonical_name": canonical_name, "category": mapping.get("category") or None}
-    canonical_response = api.insert("canonical_ingredients", list(canonical_rows.values()), on_conflict="canonical_name")
-    canonical_ids = {row["canonical_name"]: row["id"] for row in canonical_response}
+    canonical_ids: dict[str, str] = {}
+    for group in chunks(list(canonical_rows.values()), GOLD_WRITE_BATCH_SIZE):
+        canonical_response = api.insert("canonical_ingredients", group, on_conflict="canonical_name")
+        canonical_ids.update({row["canonical_name"]: row["id"] for row in canonical_response})
 
     gold_rows: list[dict[str, Any]] = []
     aliases_by_canonical: defaultdict[str, set[str]] = defaultdict(set)
@@ -371,8 +388,10 @@ def apply_gold(input_path: Path | None, mappings_path: Path) -> None:
         aliases_by_canonical[canonical_id].add(canonical_name)
         mapping_meta.append((mapping, source, canonical_id))
 
-    product_response = api.insert("products", gold_rows, on_conflict="store_id,external_product_id")
-    product_ids = {(row["store_id"], row["external_product_id"]): row["id"] for row in product_response}
+    product_ids: dict[tuple[str, str], str] = {}
+    for group in chunks(gold_rows, GOLD_WRITE_BATCH_SIZE):
+        product_response = api.insert("products", group, on_conflict="store_id,external_product_id")
+        product_ids.update({(row["store_id"], row["external_product_id"]): row["id"] for row in product_response})
     product_mappings = []
     for mapping, source, canonical_id in mapping_meta:
         product_id = product_ids.get((source["store_id"], source["external_product_id"]))
@@ -388,14 +407,16 @@ def apply_gold(input_path: Path | None, mappings_path: Path) -> None:
                 "review_status": "approved" if confidence >= 0.85 else "pending",
             }
         )
-    api.insert("product_canonical_ingredients", product_mappings, on_conflict="product_id")
+    for group in chunks(product_mappings, GOLD_WRITE_BATCH_SIZE):
+        api.insert("product_canonical_ingredients", group, on_conflict="product_id")
 
     alias_rows = [
         {"canonical_ingredient_id": canonical_id, "alias": alias, "source": "ai", "confidence": 0.9}
         for canonical_id, aliases in aliases_by_canonical.items()
         for alias in aliases
     ]
-    api.insert("ingredient_aliases", alias_rows, on_conflict="alias", resolution="ignore-duplicates")
+    for group in chunks(alias_rows, GOLD_WRITE_BATCH_SIZE):
+        api.insert("ingredient_aliases", group, on_conflict="alias", resolution="ignore-duplicates")
     print(f"Promoted {len(gold_rows)} products into gold with {len(canonical_ids)} canonical ingredients.")
 
 
