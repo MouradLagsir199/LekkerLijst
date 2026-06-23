@@ -23,6 +23,11 @@ on:
         required: true
         default: "8"
         type: string
+      model:
+        description: OpenAI model for this one-time categorization segment.
+        required: true
+        default: "gpt-5.4-mini"
+        type: string
 
 jobs:
   gold:
@@ -30,7 +35,7 @@ jobs:
     env:
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-      OPENAI_CATALOG_MODEL: gpt-5.4-mini
+      OPENAI_CATALOG_MODEL: ${{ inputs.model }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
