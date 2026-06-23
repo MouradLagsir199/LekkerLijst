@@ -328,11 +328,30 @@ Deno.serve(async (request) => {
   try {
     const recipe = JSON.parse(outputText) as Record<string, unknown>;
     if (linkContext?.imageUrl) recipe.imageUrl = linkContext.imageUrl;
+    normalizeCompleteness(recipe);
     return json({ recipe, model, source: linkContext, completionSourceText: sourceText.slice(0, 12_000) }, 200);
   } catch {
     return json({ error: "OpenAI returned invalid JSON", rawOutput: outputText }, 502);
   }
 });
+
+function normalizeCompleteness(recipe: Record<string, unknown>) {
+  if (!isRecord(recipe.completeness)) return;
+
+  const missing = Array.isArray(recipe.completeness.missingFields)
+    ? recipe.completeness.missingFields.filter((field): field is string => typeof field === "string")
+    : [];
+  const ingredients = Array.isArray(recipe.ingredients) ? recipe.ingredients : [];
+  const instructions = Array.isArray(recipe.instructions) ? recipe.instructions : [];
+  const normalizedMissing = missing.filter(
+    (field) => !(field === "ingredients" && ingredients.length > 0) && !(field === "instructions" && instructions.length > 0)
+  );
+
+  recipe.completeness = {
+    status: normalizedMissing.length ? "incomplete" : "complete",
+    missingFields: normalizedMissing
+  };
+}
 
 async function suggestRecipeCompletion(body: ParsedBody, apiKey: string) {
   const sourceText = body.sourceText?.trim().slice(0, 12_000) ?? "";
