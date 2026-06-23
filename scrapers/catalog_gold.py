@@ -133,7 +133,59 @@ def openai_headers() -> dict[str, str]:
     return {"Authorization": f"Bearer {env_or_fail('OPENAI_API_KEY')}"}
 
 
+def uses_openai_bridge() -> bool:
+    return not bool(os.environ.get("OPENAI_API_KEY"))
+
+
+def openai_bridge_url() -> str:
+    return f"{env_or_fail('SUPABASE_URL').rstrip('/')}/functions/v1/catalog-openai-bridge"
+
+
+def bridge_headers() -> dict[str, str]:
+    service_role_key = env_or_fail("SUPABASE_SERVICE_ROLE_KEY")
+    return {
+        "Authorization": f"Bearer {service_role_key}",
+        "apikey": service_role_key,
+        "Content-Type": "application/json",
+    }
+
+
+def bridge_request(action: str, payload: dict[str, Any], timeout: int = 120) -> requests.Response:
+    response = requests.post(
+        openai_bridge_url(),
+        headers=bridge_headers(),
+        json={"action": action, **payload},
+        timeout=timeout,
+    )
+    response.raise_for_status()
+    return response
+
+
+def post_openai_response(request_body: dict[str, Any]) -> dict[str, Any]:
+    if uses_openai_bridge():
+        return bridge_request("response", {"requestBody": request_body}).json()["response"]
+    response = requests.post(
+        f"{OPENAI_URL}/responses",
+        headers={**openai_headers(), "Content-Type": "application/json"},
+        json=request_body,
+        timeout=120,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
 def submit_batch(requests_path: Path, metadata_path: Path) -> None:
+    if uses_openai_bridge():
+        bridge_response = bridge_request(
+            "submit",
+            {"inputJsonl": requests_path.read_text(encoding="utf-8"), "filename": requests_path.name},
+            timeout=180,
+        ).json()
+        batch = bridge_response["batch"]
+        input_file_id = bridge_response["inputFileId"]
+        write_json(metadata_path, {"batchId": batch["id"], "inputFileId": input_file_id, "submittedAt": int(time.time())})
+        print(f"Submitted OpenAI batch {batch['id']} through the Supabase bridge.")
+        return
     with requests_path.open("rb") as handle:
         file_response = requests.post(
             f"{OPENAI_URL}/files",
@@ -165,6 +217,8 @@ def resolve_batch_id(batch_id: str | None, metadata_path: Path | None) -> str:
 
 
 def get_batch(batch_id: str) -> dict[str, Any]:
+    if uses_openai_bridge():
+        return bridge_request("status", {"batchId": batch_id}).json()["batch"]
     response = requests.get(f"{OPENAI_URL}/batches/{batch_id}", headers=openai_headers(), timeout=60)
     response.raise_for_status()
     return response.json()
@@ -180,11 +234,15 @@ def batch_status(batch_id: str | None, metadata_path: Path | None) -> None:
 
 
 def download_batch(batch_id: str | None, metadata_path: Path | None, output_path: Path) -> None:
-    batch = get_batch(resolve_batch_id(batch_id, metadata_path))
+    resolved_batch_id = resolve_batch_id(batch_id, metadata_path)
+    batch = get_batch(resolved_batch_id)
     output_file_id = batch.get("output_file_id")
     if not output_file_id:
         raise SystemExit("Batch is not complete or status has not been refreshed. Run status first.")
-    response = requests.get(f"{OPENAI_URL}/files/{output_file_id}/content", headers=openai_headers(), timeout=120)
+    if uses_openai_bridge():
+        response = bridge_request("download", {"batchId": resolved_batch_id}, timeout=180)
+    else:
+        response = requests.get(f"{OPENAI_URL}/files/{output_file_id}/content", headers=openai_headers(), timeout=120)
     response.raise_for_status()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_bytes(response.content)

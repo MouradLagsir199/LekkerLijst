@@ -20,7 +20,6 @@ jobs:
     env:
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       OPENAI_CATALOG_MODEL: gpt-5.4-mini
     steps:
       - uses: actions/checkout@v4

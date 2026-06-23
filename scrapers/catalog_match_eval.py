@@ -13,9 +13,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-import requests
-
-from catalog_gold import OPENAI_URL, openai_headers, output_text
+from catalog_gold import output_text, post_openai_response
 from catalog_pipeline import SupabaseApi, env_or_fail
 
 
@@ -135,21 +133,17 @@ def run_ai_review(report: dict[str, Any], model: str) -> dict[str, Any]:
         "item is materially different. Mark uncertain only when the candidate data is insufficient. "
         "Return one decision per input case in concise Dutch."
     )
-    response = requests.post(
-        f"{OPENAI_URL}/responses",
-        headers={**openai_headers(), "Content-Type": "application/json"},
-        json={
+    response_body = post_openai_response(
+        {
             "model": model,
             "input": [
                 {"role": "system", "content": instructions},
                 {"role": "user", "content": json.dumps(ai_review_payload(report), ensure_ascii=False)},
             ],
             "text": {"format": {"type": "json_schema", "name": "catalog_match_review", "strict": True, "schema": AI_REVIEW_SCHEMA}},
-        },
-        timeout=120,
+        }
     )
-    response.raise_for_status()
-    text = output_text(response.json())
+    text = output_text(response_body)
     if not text:
         raise RuntimeError("OpenAI returned no structured catalog review")
     review = json.loads(text)

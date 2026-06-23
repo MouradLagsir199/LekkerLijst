@@ -1,12 +1,27 @@
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from catalog_gold import parse_batch, prepare_batch
+from catalog_gold import parse_batch, post_openai_response, prepare_batch
 
 
 class CatalogGoldTests(unittest.TestCase):
+    def test_uses_the_service_role_bridge_without_a_local_openai_key(self) -> None:
+        with patch.dict(os.environ, {"OPENAI_API_KEY": ""}):
+            with patch("catalog_gold.bridge_request") as bridge_request:
+                bridge_request.return_value.json.return_value = {"response": {"id": "resp-test"}}
+
+                response = post_openai_response({"model": "gpt-5.4-mini", "input": "test"})
+
+        self.assertEqual(response["id"], "resp-test")
+        bridge_request.assert_called_once_with(
+            "response",
+            {"requestBody": {"model": "gpt-5.4-mini", "input": "test"}},
+        )
+
     def test_prepares_and_parses_structured_batch_data(self) -> None:
         products = [
             {
