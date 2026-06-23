@@ -56,7 +56,7 @@ Important rule:
    - Link import uses public metadata, JSON-LD Recipe data, and TikTok/Pinterest oEmbed where available.
 - Pinterest follows the pin to its public source recipe page and also reads Pin-level thumbnail, caption, and video metadata through Apify. Native captions are preferred; a public video gets a bounded transcription only when its written recipe data is incomplete.
    - Instagram and Facebook post links use dedicated Apify actors for title/caption extraction before recipe parsing.
-   - Instagram Reels and TikTok video links use transcript actors after caption/metadata extraction. Recipes remain incomplete when the combined source omits quantities or steps.
+   - Instagram Reels and TikTok video links use transcript actors after caption/metadata extraction, with a cross-platform fallback when Instagram cannot resolve the source audio. Recipes remain incomplete when the combined source omits quantities or steps.
    - User-initiated share sheet for iOS and Android remains deferred.
 
 4. Add paid product foundations.

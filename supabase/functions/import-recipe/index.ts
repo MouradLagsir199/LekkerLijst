@@ -489,7 +489,10 @@ async function collectLinkContext(url: string): Promise<LinkContext> {
   };
 
   let transcript: string | undefined;
-  const needsTranscript = !hasLikelyCompleteRecipeSignal(baseContext);
+  const hasCompleteStructuredRecipe = baseContext.recipes.some(
+    (recipe) => (recipe.recipeIngredient?.length ?? 0) > 0 && (recipe.recipeInstructions?.length ?? 0) > 0
+  );
+  const needsTranscript = !hasCompleteStructuredRecipe;
 
   // Always inspect captions and metadata before paying for transcription. This avoids
   // processing a video when the post already contains a complete written recipe.
@@ -498,6 +501,13 @@ async function collectLinkContext(url: string): Promise<LinkContext> {
       transcript = await fetchInstagramTranscriptFromApify(url);
     } catch (error) {
       extractionWarnings.push(error instanceof Error ? error.message : "Instagram transcript extraction failed");
+    }
+    if (!transcript) {
+      try {
+        transcript = await fetchUniversalSocialTranscriptFromApify(url, "instagram");
+      } catch (error) {
+        extractionWarnings.push(error instanceof Error ? error.message : "Instagram fallback transcript extraction failed");
+      }
     }
   }
 
@@ -642,7 +652,7 @@ async function fetchInstagramTranscriptFromApify(url: string) {
   return transcript.slice(0, 12_000);
 }
 
-async function fetchUniversalSocialTranscriptFromApify(url: string, platform: "tiktok" | "facebook") {
+async function fetchUniversalSocialTranscriptFromApify(url: string, platform: "instagram" | "tiktok" | "facebook") {
   const items = await runApifyActor(
     UNIVERSAL_SOCIAL_TRANSCRIPT_ACTOR,
     { start_urls: url },
@@ -1007,29 +1017,6 @@ function hasUsableRecipeSignal(context: LinkContext) {
   if (text.length < 80) return false;
 
   return /\b(ingredients?|ingredienten|directions?|bereiding|instructions?|stappen|tbsp|tsp|cups?|gram|g\b|ml\b|eieren)\b/i.test(text);
-}
-
-function hasLikelyCompleteRecipeSignal(context: LinkContext) {
-  if (isSocialLoginPage(context)) return false;
-
-  if (
-    context.recipes.some(
-      (recipe) => (recipe.recipeIngredient?.length ?? 0) > 0 && (recipe.recipeInstructions?.length ?? 0) > 0
-    )
-  ) {
-    return true;
-  }
-
-  const text = [context.title, context.description, context.oembed ? formatOembed(context.oembed) : ""]
-    .filter(Boolean)
-    .join(" ")
-    .trim();
-  if (text.length < 120) return false;
-
-  const hasIngredientList = /\b(ingredients?|ingredienten|benodigdheden)\b/i.test(text);
-  const hasInstruction = /\b(stap(?:pen)?|bereid(?:ing|en)?|instructions?|directions?|kook|bak|meng|voeg|verwarm|roer)\b/i.test(text);
-  const hasQuantity = /\b\d+(?:[.,]\d+)?\s*(?:g|kg|ml|cl|dl|l|el|tl|tbsp|tsp|cups?|eieren?|stuks?)\b/i.test(text);
-  return hasIngredientList && hasInstruction && hasQuantity;
 }
 
 function missingRecipeSignalDetails(context: LinkContext) {
