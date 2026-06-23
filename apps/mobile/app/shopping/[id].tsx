@@ -1,4 +1,4 @@
-import { formatQuantity } from "@recipe-nl/shared";
+import { filterRelevantProductCandidates, formatQuantity } from "@recipe-nl/shared";
 import { useQuery } from "@tanstack/react-query";
 import { Stack, useLocalSearchParams, useRouter } from "expo-router";
 import { PackageCheck } from "lucide-react-native";
@@ -172,17 +172,24 @@ function ProductAlternatives({ item, onSelect }: { item: any; onSelect: (product
         match_count: 8
       });
       if (error) throw error;
-      return data ?? [];
+      return filterRelevantProductCandidates(
+        (data ?? []).map((product: any) => ({
+          ...product,
+          currentPriceCents: product.current_price_cents,
+          matchScore: product.match_score
+        }))
+      );
     }
   });
 
   if (alternatives.isLoading) return <ActivityIndicator color={colors.primaryDark} />;
   if (alternatives.error) return <Text style={styles.error}>{String(alternatives.error.message)}</Text>;
+  const products = alternatives.data ?? [];
 
   return (
     <View style={styles.alternativeList}>
       <Text style={styles.alternativeTitle}>Beschikbaar bij deze winkels</Text>
-      {alternatives.data.map((product: any) => (
+      {products.map((product: any) => (
         <Pressable key={product.product_id} onPress={() => onSelect(product)} style={({ pressed }) => [styles.alternativeRow, pressed && styles.pressed]}>
           <View style={styles.alternativeHeader}>
             <Text style={styles.alternativeName}>{product.product_name}</Text>
@@ -195,7 +202,7 @@ function ProductAlternatives({ item, onSelect }: { item: any; onSelect: (product
           </Text>
         </Pressable>
       ))}
-      {alternatives.data.length === 0 ? <Text style={styles.meta}>Geen alternatieven gevonden.</Text> : null}
+      {products.length === 0 ? <Text style={styles.meta}>Geen passende winkelvarianten gevonden.</Text> : null}
     </View>
   );
 }

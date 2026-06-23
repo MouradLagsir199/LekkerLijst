@@ -181,7 +181,7 @@ const styles = StyleSheet.create({
     gap: spacing.md
   },
   card: {
-    minHeight: 126,
+    height: 126,
     borderRadius: radii.md,
     borderWidth: 1,
     borderColor: colors.border,
@@ -192,7 +192,7 @@ const styles = StyleSheet.create({
   },
   image: {
     width: 112,
-    height: "100%",
+    height: 126,
     borderRadius: 0
   },
   cardBody: {

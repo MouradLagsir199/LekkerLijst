@@ -2,16 +2,16 @@ import { formatQuantity } from "@recipe-nl/shared";
 import DateTimePicker from "@react-native-community/datetimepicker";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Stack, useLocalSearchParams, useRouter } from "expo-router";
-import { AlertTriangle, CalendarDays, Check, Pencil, Plus, ShoppingCart } from "lucide-react-native";
+import { AlertTriangle, CalendarDays, Check, Pencil, Plus, ShoppingCart, Trash2 } from "lucide-react-native";
 import { useMemo, useState } from "react";
-import { ActivityIndicator, Platform, Pressable, StyleSheet, Text, View } from "react-native";
+import { ActivityIndicator, Alert, Platform, Pressable, StyleSheet, Text, View } from "react-native";
 
 import { Button } from "../../components/Button";
 import { RecipeImage } from "../../components/RecipeImage";
 import { Screen } from "../../components/Screen";
 import { useAuth } from "../../lib/auth";
 import { getImportDraft } from "../../lib/importDraft";
-import { addRecipeIngredientToScheduledShoppingList } from "../../lib/repository";
+import { addRecipeIngredientToScheduledShoppingList, errorMessage } from "../../lib/repository";
 import { supabase } from "../../lib/supabase";
 import { colors, radii, shadows, spacing, typography } from "../../lib/theme";
 
@@ -39,6 +39,7 @@ export default function RecipeDetailScreen() {
   const [addedIngredientKeys, setAddedIngredientKeys] = useState<string[]>([]);
   const [feedback, setFeedback] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   const recipeQuery = useQuery({
     queryKey: ["recipe", recipeId],
@@ -84,7 +85,7 @@ export default function RecipeDetailScreen() {
       );
       await queryClient.invalidateQueries({ queryKey: ["shopping-lists-tab"] });
     } catch (addError) {
-      setError(addError instanceof Error ? addError.message : String(addError));
+      setError(errorMessage(addError));
     } finally {
       setAddingIngredientId(null);
     }
@@ -115,12 +116,38 @@ export default function RecipeDetailScreen() {
   const ingredients = [...(recipe.recipe_ingredients ?? [])].sort((a, b) => a.sort_order - b.sort_order) as RecipeIngredient[];
   const instructions = [...(recipe.recipe_instructions ?? [])].sort((a, b) => a.step_number - b.step_number);
 
+  function confirmDelete() {
+    Alert.alert("Recept verwijderen", `Weet je zeker dat je '${recipe.title}' wilt verwijderen?`, [
+      { text: "Annuleren", style: "cancel" },
+      { text: "Verwijderen", style: "destructive", onPress: () => void deleteRecipe() }
+    ]);
+  }
+
+  async function deleteRecipe() {
+    setDeleting(true);
+    setError(null);
+    const { error: deleteError } = await supabase.from("recipes").delete().eq("id", recipe.id);
+    setDeleting(false);
+    if (deleteError) {
+      setError(errorMessage(deleteError));
+      return;
+    }
+    await queryClient.invalidateQueries({ queryKey: ["recipes-tab"] });
+    await queryClient.invalidateQueries({ queryKey: ["planning-recipes"] });
+    router.replace("/recipes");
+  }
+
   return (
     <Screen>
       <Stack.Screen options={{ title: recipe.title }} />
       <RecipeImage uri={recipe.image_url} style={styles.heroImage} />
       <View style={styles.heading}>
-        <Text style={styles.title}>{recipe.title}</Text>
+        <View style={styles.titleRow}>
+          <Text style={styles.title}>{recipe.title}</Text>
+          <Pressable accessibilityLabel="Recept verwijderen" accessibilityRole="button" disabled={deleting} onPress={confirmDelete} style={styles.deleteButton}>
+            {deleting ? <ActivityIndicator color={colors.danger} size="small" /> : <Trash2 color={colors.danger} size={19} strokeWidth={2.4} />}
+          </Pressable>
+        </View>
         {recipe.servings ? <Text style={styles.meta}>{recipe.servings} porties</Text> : null}
         {recipe.tags?.length ? (
           <View style={styles.tagList}>
@@ -322,8 +349,24 @@ const styles = StyleSheet.create({
     borderRadius: radii.md
   },
   title: {
+    flex: 1,
     color: colors.text,
     ...typography.title
+  },
+  titleRow: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: spacing.sm
+  },
+  deleteButton: {
+    width: 38,
+    height: 38,
+    borderRadius: radii.sm,
+    borderWidth: 1,
+    borderColor: "#f0c7c7",
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#fff7f7"
   },
   meta: {
     color: colors.muted,

@@ -5,6 +5,12 @@ type SupabaseLike = {
   rpc: (fn: string, args: Record<string, unknown>) => any;
 };
 
+export function errorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === "object" && error && "message" in error && typeof error.message === "string") return error.message;
+  return "Er ging iets mis. Probeer het opnieuw.";
+}
+
 export async function saveRecipe(input: {
   supabase: SupabaseLike;
   userId: string;

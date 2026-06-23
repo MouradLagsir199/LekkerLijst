@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { scoreProductForIngredient, selectLowestPricedRelevantProduct } from "../src/productMatching";
+import { filterRelevantProductCandidates, scoreProductForIngredient, selectLowestPricedRelevantProduct } from "../src/productMatching";
 
 describe("product matching", () => {
   it("rewards lexical overlap and preferred store", () => {
@@ -59,5 +59,14 @@ describe("product matching", () => {
 
   it("returns no automatic match without a score and shelf price", () => {
     expect(selectLowestPricedRelevantProduct([{ currentPriceCents: null, matchScore: 0.9 }])).toBeNull();
+  });
+
+  it("hides weak fuzzy matches from visible store variants", () => {
+    const visible = filterRelevantProductCandidates([
+      { id: "kipfilet", currentPriceCents: 420, matchScore: 2.1 },
+      { id: "boter", currentPriceCents: 135, matchScore: 0.44 }
+    ]);
+
+    expect(visible.map((candidate) => candidate.id)).toEqual(["kipfilet"]);
   });
 });
