@@ -1,0 +1,26 @@
+name: Catalog Scraper Smoke Tests
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "AH/**"
+      - "Jumbo/**"
+      - "Dirk/**"
+      - "Plus/**"
+      - "scrapers/**"
+      - ".github/workflows/catalog-*.yml"
+
+jobs:
+  normalize-fixture:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install pipeline dependencies
+        run: pip install -r scrapers/requirements.txt
+      - name: Test normalizer
+        working-directory: scrapers
+        run: python -m unittest test_catalog_pipeline.py test_catalog_gold.py

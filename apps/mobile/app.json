@@ -1,0 +1,26 @@
+{
+  "expo": {
+    "name": "Recipe NL",
+    "slug": "recipe-nl",
+    "scheme": "recipenl",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "plugins": [
+      "expo-router",
+      "@react-native-community/datetimepicker",
+      "expo-image-picker"
+    ],
+    "experiments": {
+      "typedRoutes": true
+    },
+    "ios": {
+      "supportsTablet": true
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#ffffff"
+      }
+    }
+  }
+}

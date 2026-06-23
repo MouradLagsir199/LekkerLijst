@@ -1,0 +1,32 @@
+{
+  "name": "recipe-nl",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "start": "npm run start --workspace apps/mobile",
+    "start:clear": "npm run start:clear --workspace apps/mobile",
+    "android": "npm run android --workspace apps/mobile",
+    "ios": "npm run ios --workspace apps/mobile",
+    "web": "npm run web --workspace apps/mobile",
+    "test": "vitest run packages/shared/test",
+    "typecheck:shared": "tsc -p packages/shared/tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "zod": "^3.25.76"
+  },
+  "overrides": {
+    "react": "19.2.3",
+    "react-dom": "19.2.3",
+    "react-is": "19.2.3",
+    "react-native-safe-area-context": "5.7.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.3",
+    "typescript": "~6.0.3",
+    "vitest": "^3.2.4"
+  }
+}
