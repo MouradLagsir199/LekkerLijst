@@ -38,7 +38,7 @@ class CatalogGoldTests(unittest.TestCase):
         mapping = {
             "mappings": [
                 {
-                    "silverProductId": "silver-1",
+                    "itemIndex": 0,
                     "canonicalName": "boter",
                     "category": "Zuivel",
                     "aliases": ["margarine", "roomboter"],
@@ -59,15 +59,16 @@ class CatalogGoldTests(unittest.TestCase):
             prepare_batch(input_path, request_path, manifest_path, "gpt-5.4-mini")
             request = json.loads(request_path.read_text(encoding="utf-8").strip())
             self.assertEqual(request["body"]["model"], "gpt-5.4-mini")
-            self.assertIn("silver-1", request["body"]["input"][1]["content"])
+            self.assertIn('"itemIndex": 0', request["body"]["input"][1]["content"])
 
             output = {
                 "custom_id": request["custom_id"],
                 "response": {"body": {"output": [{"content": [{"type": "output_text", "text": json.dumps(mapping)}]}]}},
             }
             output_path.write_text(json.dumps(output) + "\n", encoding="utf-8")
-            parse_batch(output_path, mappings_path)
+            parse_batch(output_path, mappings_path, manifest_path)
             self.assertEqual(read_json(mappings_path)[0]["canonicalName"], "boter")
+            self.assertEqual(read_json(mappings_path)[0]["silverProductId"], "silver-1")
 
     def test_prepares_a_non_overlapping_catalog_segment(self) -> None:
         products = [
@@ -84,12 +85,9 @@ class CatalogGoldTests(unittest.TestCase):
             prepare_batch(input_path, request_path, manifest_path, "gpt-5.4-mini", segment=2, segments=2)
 
             requests = [json.loads(line) for line in request_path.read_text(encoding="utf-8").splitlines()]
-            product_ids = {
-                product["silverProductId"]
-                for request in requests
-                for product in json.loads(request["body"]["input"][1]["content"])
-            }
-            self.assertEqual(product_ids, {"silver-160"})
+            manifest = read_json(manifest_path)
+            self.assertEqual(set(next(iter(manifest.values()))), {"silver-160"})
+            self.assertEqual(json.loads(requests[0]["body"]["input"][1]["content"])[0]["itemIndex"], 0)
             self.assertTrue(all(request["custom_id"].startswith("catalog-segment-02-") for request in requests))
 
     def test_discards_duplicate_and_unknown_silver_mappings(self) -> None:

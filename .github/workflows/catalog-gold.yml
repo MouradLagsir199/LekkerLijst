@@ -49,6 +49,8 @@ jobs:
       - name: Download, parse, and promote Batch API results
         if: inputs.stage == 'finish'
         run: |
+          python scrapers/catalog_gold.py export --out data/catalog-gold/silver.json
+          python scrapers/catalog_gold.py prepare-batch --input data/catalog-gold/silver.json --requests data/catalog-gold/requests.jsonl --manifest data/catalog-gold/manifest.json --segment "${{ inputs.segment }}" --segments "${{ inputs.segments }}"
           python scrapers/catalog_gold.py download-batch --batch-id "${{ inputs.batch_id }}" --out data/catalog-gold/results.jsonl
-          python scrapers/catalog_gold.py parse-batch --input data/catalog-gold/results.jsonl --out data/catalog-gold/mappings.json
+          python scrapers/catalog_gold.py parse-batch --input data/catalog-gold/results.jsonl --out data/catalog-gold/mappings.json --manifest data/catalog-gold/manifest.json
           python scrapers/catalog_gold.py apply --from-current --mappings data/catalog-gold/mappings.json

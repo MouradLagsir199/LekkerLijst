@@ -35,9 +35,9 @@ MAPPING_SCHEMA = {
             "items": {
                 "type": "object",
                 "additionalProperties": False,
-                "required": ["silverProductId", "canonicalName", "category", "aliases", "confidence"],
+                "required": ["itemIndex", "canonicalName", "category", "aliases", "confidence"],
                 "properties": {
-                    "silverProductId": {"type": "string"},
+                    "itemIndex": {"type": "integer", "minimum": 0},
                     "canonicalName": {"type": "string", "minLength": 1, "maxLength": 80},
                     "category": {"type": "string", "minLength": 1, "maxLength": 80},
                     "aliases": {"type": "array", "maxItems": 8, "items": {"type": "string", "minLength": 1, "maxLength": 80}},
@@ -71,7 +71,7 @@ def export_current_silver(output: Path, limit: int | None) -> None:
     rows = api.fetch_all(
         "silver_products",
         "id,store_id,external_product_id,name,brand,category,subcategory,image_url,product_url,package_size_text,unit_quantity,unit_type,current_price_cents,unit_price_cents,unit_price_unit,is_available,scraped_at",
-        {"is_current": "eq.true"},
+        {"is_current": "eq.true", "order": "id.asc"},
     )
     rows = [row for row in rows if row.get("is_available")]
     if limit is not None:
@@ -83,7 +83,8 @@ def export_current_silver(output: Path, limit: int | None) -> None:
 def system_prompt() -> str:
     return (
         "You map Dutch supermarket products to concise canonical Dutch recipe ingredients. "
-        "Return only the requested JSON. Preserve silverProductId exactly. "
+        "Return exactly one mapping for every supplied itemIndex, once each, in ascending itemIndex order. "
+        "Preserve itemIndex exactly; do not invent, omit, or repeat an index. "
         "Use lower-case Dutch canonical names that users naturally write in recipes. "
         "Choose the broad recipe grouping when appropriate: Zaanse Hoeve margarine maps to boter, "
         "Duo Penotti maps to chocoladepasta, and a branded kipfilet maps to kipfilet. "
@@ -92,17 +93,26 @@ def system_prompt() -> str:
     )
 
 
+def mapping_schema_for_group(group_size: int) -> dict[str, Any]:
+    schema = json.loads(json.dumps(MAPPING_SCHEMA))
+    mappings = schema["properties"]["mappings"]
+    mappings["minItems"] = group_size
+    mappings["maxItems"] = group_size
+    mappings["items"]["properties"]["itemIndex"]["maximum"] = group_size - 1
+    return schema
+
+
 def make_request_body(group: list[dict[str, Any]], model: str) -> dict[str, Any]:
     compact = [
         {
-            "silverProductId": row["id"],
+            "itemIndex": item_index,
             "name": row["name"],
             "brand": row.get("brand"),
             "category": row.get("category"),
             "subcategory": row.get("subcategory"),
             "package": row.get("package_size_text"),
         }
-        for row in group
+        for item_index, row in enumerate(group)
     ]
     return {
         "model": model,
@@ -110,7 +120,7 @@ def make_request_body(group: list[dict[str, Any]], model: str) -> dict[str, Any]
             {"role": "system", "content": system_prompt()},
             {"role": "user", "content": json.dumps(compact, ensure_ascii=False)},
         ],
-        "text": {"format": {"type": "json_schema", "name": "gold_product_mappings", "strict": True, "schema": MAPPING_SCHEMA}},
+        "text": {"format": {"type": "json_schema", "name": "gold_product_mappings", "strict": True, "schema": mapping_schema_for_group(len(group))}},
     }
 
 
@@ -278,9 +288,10 @@ def output_text(response_body: dict[str, Any]) -> str | None:
     return None
 
 
-def parse_batch(batch_output_path: Path, mappings_path: Path) -> None:
+def parse_batch(batch_output_path: Path, mappings_path: Path, manifest_path: Path | None = None) -> None:
     mappings: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = []
+    manifest = read_json(manifest_path) if manifest_path else None
     for line in batch_output_path.read_text(encoding="utf-8").splitlines():
         record = json.loads(line)
         body = record.get("response", {}).get("body")
@@ -293,7 +304,36 @@ def parse_batch(batch_output_path: Path, mappings_path: Path) -> None:
             continue
         try:
             parsed = json.loads(text)
-            mappings.extend(parsed.get("mappings", []))
+            response_mappings = parsed.get("mappings", [])
+            if not isinstance(response_mappings, list):
+                failures.append(record)
+                continue
+            if manifest is None:
+                mappings.extend(response_mappings)
+                continue
+            source_ids = manifest.get(record.get("custom_id"))
+            if not isinstance(source_ids, list):
+                failures.append(record)
+                continue
+            mapped_response: list[dict[str, Any]] = []
+            item_indexes: set[int] = set()
+            for mapping in response_mappings:
+                item_index = mapping.get("itemIndex") if isinstance(mapping, dict) else None
+                if (
+                    not isinstance(item_index, int)
+                    or item_index < 0
+                    or item_index >= len(source_ids)
+                    or item_index in item_indexes
+                ):
+                    failures.append(record)
+                    mapped_response = []
+                    break
+                item_indexes.add(item_index)
+                mapped_response.append({**mapping, "silverProductId": source_ids[item_index]})
+            if mapped_response and item_indexes != set(range(len(source_ids))):
+                failures.append(record)
+                mapped_response = []
+            mappings.extend(mapped_response)
         except json.JSONDecodeError:
             failures.append(record)
     write_json(mappings_path, mappings)
@@ -452,6 +492,7 @@ def main() -> None:
     parse_parser = subparsers.add_parser("parse-batch")
     parse_parser.add_argument("--input", type=Path, required=True)
     parse_parser.add_argument("--out", type=Path, required=True)
+    parse_parser.add_argument("--manifest", type=Path)
 
     apply_parser = subparsers.add_parser("apply")
     apply_parser.add_argument("--silver", type=Path)
@@ -470,7 +511,7 @@ def main() -> None:
     elif args.command == "download-batch":
         download_batch(args.batch_id, args.metadata, args.out)
     elif args.command == "parse-batch":
-        parse_batch(args.input, args.out)
+        parse_batch(args.input, args.out, args.manifest)
     elif args.command == "apply":
         if not args.silver and not args.from_current:
             raise SystemExit("Provide --silver or --from-current.")
