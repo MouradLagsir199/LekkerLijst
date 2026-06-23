@@ -87,6 +87,14 @@ Deno.serve(async (request) => {
       return json({ batch: await batchResponse.json() });
     }
 
+    if (action === "cancel") {
+      const batchId = payload.batchId;
+      if (typeof batchId !== "string" || !batchId) return json({ error: "batchId is required" }, 400);
+      const batchResponse = await openAiJson(`/batches/${encodeURIComponent(batchId)}/cancel`, { method: "POST" });
+      if (!batchResponse.ok) return openAiError(batchResponse);
+      return json({ batch: await batchResponse.json() });
+    }
+
     if (action === "download") {
       const batchId = payload.batchId;
       if (typeof batchId !== "string" || !batchId) return json({ error: "batchId is required" }, 400);

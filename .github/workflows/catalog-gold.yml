@@ -21,7 +21,7 @@ on:
       segments:
         description: Total number of gold segments.
         required: true
-        default: "4"
+        default: "8"
         type: string
 
 jobs:
