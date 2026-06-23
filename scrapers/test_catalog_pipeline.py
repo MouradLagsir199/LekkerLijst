@@ -54,6 +54,24 @@ class CatalogPipelineTests(unittest.TestCase):
         self.assertEqual(parse_money_cents("€ 1.299,95"), 129995)
         self.assertIsNone(parse_money_cents("onbekend"))
 
+    def test_keeps_ah_product_when_current_price_is_missing(self) -> None:
+        product = normalize_row(
+            "ah",
+            {
+                "webshopId": "169813",
+                "title": "AH Bosui",
+                "priceBeforeBonus": "0.99",
+                "salesUnitSize": "per bosje",
+                "mainCategory": "Groente, aardappelen",
+                "subCategory": "Ui",
+            },
+            2,
+        )
+
+        assert product is not None
+        self.assertEqual(product.external_product_id, "169813")
+        self.assertEqual(product.current_price_cents, 99)
+
 
 if __name__ == "__main__":
     unittest.main()

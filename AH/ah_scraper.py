@@ -141,6 +141,7 @@ CSV_COLUMNS = [
 ]
 
 EXTRA_WEBSHOP_IDS = {
+    169813,  # AH Bosui
     395080,  # Verkade Glutenvrije oaties naturel
     419519,  # Honig Spaghetti vlugkokend
     478224,  # Zanetti Parmigiano reggiano 30+

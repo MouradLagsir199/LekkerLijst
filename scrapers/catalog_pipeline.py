@@ -261,7 +261,15 @@ def stable_external_id(row: dict[str, Any], name: str, product_url: str | None) 
 
 def normalize_row(store_id: str, row: dict[str, Any], row_number: int) -> NormalizedProduct | None:
     name = find_value(row, "title", "product_name", "name", "regulated_name")
-    price_raw = find_value(row, "currentPrice", "price", "current_price", "effective_price", "normal_price")
+    price_raw = find_value(
+        row,
+        "currentPrice",
+        "price",
+        "current_price",
+        "effective_price",
+        "normal_price",
+        "priceBeforeBonus",
+    )
     price_cents = parse_money_cents(price_raw)
     if not name or price_cents is None:
         return None

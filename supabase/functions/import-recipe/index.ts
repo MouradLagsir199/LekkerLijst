@@ -286,7 +286,7 @@ Deno.serve(async (request) => {
         {
           role: "system",
           content:
-            "Faithfully extract a recipe from messy user-provided text, social metadata, or a transcript. Return only the requested JSON schema. All user-visible text must be natural Dutch: translate titles, descriptions, ingredients, preparation notes, and instructions while preserving their meaning. Normalize ingredients for Dutch supermarket shopping. Generate 1 to 8 short lowercase Dutch filter tags that describe the dish, cuisine, main ingredient, method, or diet only when supported by the source. Never invent quantities, ingredients, servings, or missing/cut-off instructions. Mark an ingredient quantity as missing when it is not stated. Mark completeness incomplete and list every missing field when the source is partial. Set all extracted ingredient and instruction provenance to source."
+            "Faithfully extract a recipe from messy user-provided text, social metadata, or a transcript. Return only the requested JSON schema. MANDATORY OUTPUT LANGUAGE: Dutch. Every user-visible field must be natural Dutch, including title, description, ingredientName, normalizedIngredientName, dutchIngredientName, rawText, preparation, instructions, and tags. Translate all English ingredient names into common Dutch supermarket terms. Use bosui for green onion, green onions, spring onion, spring onions, scallion, scallions, and lente-ui; do not use an English synonym. Normalize ingredients for Dutch supermarket shopping. Generate 1 to 8 short lowercase Dutch filter tags that describe the dish, cuisine, main ingredient, method, or diet only when supported by the source. Never invent quantities, ingredients, servings, or missing/cut-off instructions. Mark an ingredient quantity as missing when it is not stated. Mark completeness incomplete and list every missing field when the source is partial. Set all extracted ingredient and instruction provenance to source."
         },
         {
           role: "user",
@@ -328,12 +328,96 @@ Deno.serve(async (request) => {
   try {
     const recipe = JSON.parse(outputText) as Record<string, unknown>;
     if (linkContext?.imageUrl) recipe.imageUrl = linkContext.imageUrl;
-    normalizeCompleteness(recipe);
-    return json({ recipe, model, source: linkContext, completionSourceText: sourceText.slice(0, 12_000) }, 200);
-  } catch {
-    return json({ error: "De importservice gaf een ongeldig recept terug.", rawOutput: outputText }, 502);
+    const localizedRecipe = await localizeRecipeToDutch(recipe, apiKey);
+    normalizeCompleteness(localizedRecipe);
+    return json({ recipe: localizedRecipe, model, source: linkContext, completionSourceText: sourceText.slice(0, 12_000) }, 200);
+  } catch (error) {
+    return json(
+      {
+        error: "Het recept kon niet volledig naar het Nederlands worden vertaald.",
+        details: error instanceof Error ? error.message : undefined
+      },
+      502
+    );
   }
 });
+
+async function localizeRecipeToDutch(recipe: Record<string, unknown>, apiKey: string): Promise<Record<string, unknown>> {
+  const model = Deno.env.get("OPENAI_RECIPE_TRANSLATION_MODEL") || Deno.env.get("OPENAI_RECIPE_MODEL") || "gpt-5.4-mini";
+  const response = await fetch("https://api.openai.com/v1/responses", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      model,
+      input: [
+        {
+          role: "system",
+          content:
+            "You are a strict Dutch recipe localization validator. Return only the supplied JSON schema. Translate every user-visible string into natural Dutch while keeping all quantities, ingredient facts, order, provenance, source URL, source platform, and completeness unchanged. Every ingredientName, normalizedIngredientName, dutchIngredientName, and rawText must be a Dutch supermarket term. Required mappings: green onion, green onions, spring onion, spring onions, scallion, scallions, and lente-ui always become bosui. Do not add, remove, merge, or infer ingredients, quantities, servings, or instructions. Tags must be short lowercase Dutch words."
+        },
+        {
+          role: "user",
+          content: `Recipe JSON to localize:\n${JSON.stringify(recipe)}`
+        }
+      ],
+      text: {
+        format: {
+          type: "json_schema",
+          name: "dutch_localized_recipe",
+          strict: true,
+          schema: recipeJsonSchema
+        }
+      }
+    })
+  });
+
+  const body = await response.json();
+  if (!response.ok) {
+    throw new Error(body.error?.message ?? "Nederlandse lokalisatie mislukt.");
+  }
+
+  const outputText = extractOutputText(body);
+  if (!outputText) throw new Error("De lokalisatie gaf geen bruikbaar recept terug.");
+
+  const localized = JSON.parse(outputText) as Record<string, unknown>;
+  applyKnownDutchIngredientAliases(localized);
+  return localized;
+}
+
+function applyKnownDutchIngredientAliases(recipe: Record<string, unknown>) {
+  if (!Array.isArray(recipe.ingredients)) return;
+
+  for (const ingredient of recipe.ingredients) {
+    if (!isRecord(ingredient)) continue;
+    const currentName = pickString(ingredient.dutchIngredientName, ingredient.normalizedIngredientName, ingredient.ingredientName);
+    const dutchName = knownDutchIngredientName(currentName);
+    if (!dutchName) continue;
+
+    ingredient.ingredientName = dutchName;
+    ingredient.normalizedIngredientName = dutchName;
+    ingredient.dutchIngredientName = dutchName;
+    if (typeof ingredient.rawText === "string") ingredient.rawText = replaceKnownIngredientAlias(ingredient.rawText, dutchName);
+  }
+}
+
+function knownDutchIngredientName(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  const normalized = value.toLowerCase().replace(/[-_]/g, " ").replace(/\s+/g, " ").trim();
+  if (/\b(green onions?|spring onions?|scallions?|lente uitjes?|lente ui)\b/.test(normalized)) return "bosui";
+  return undefined;
+}
+
+function replaceKnownIngredientAlias(value: string, replacement: string): string {
+  return value
+    .replace(/\bgreen onions?\b/gi, replacement)
+    .replace(/\bspring onions?\b/gi, replacement)
+    .replace(/\bscallions?\b/gi, replacement)
+    .replace(/\blente[ -]?uitjes?\b/gi, replacement)
+    .replace(/\blente[ -]?ui\b/gi, replacement);
+}
 
 function normalizeCompleteness(recipe: Record<string, unknown>) {
   if (!isRecord(recipe.completeness)) return;
@@ -373,7 +457,7 @@ async function suggestRecipeCompletion(body: ParsedBody, apiKey: string) {
         {
           role: "system",
           content:
-            "Create a proposed completion for an incomplete recipe. Treat the Faithful extraction JSON as immutable evidence: keep every source ingredient and every source instruction verbatim, in the same order, with source provenance. Do not remove, merge, rewrite, or reclassify those source records. For an existing source ingredient with a missing quantity, keep its source fields and set only the proposed quantity/unit to ai_suggestion provenance. Add plausible new ingredients, servings, and extra cut-off instructions only when needed to make the recipe cookable; every added or materially changed value must use ai_suggestion provenance. Return completeness complete with no missing fields. This is a proposal for user review, not a claim about the original post."
+            "Create a proposed completion for an incomplete recipe. Keep every source ingredient and every source instruction in the same order with source provenance, but translate all user-visible text to natural Dutch. Do not remove, merge, rewrite the meaning of, or reclassify source records. For an existing source ingredient with a missing quantity, keep its source fields and set only the proposed quantity/unit to ai_suggestion provenance. Add plausible new ingredients, servings, and extra cut-off instructions only when needed to make the recipe cookable; every added or materially changed value must use ai_suggestion provenance. Use bosui for green onion, spring onion, scallion, and lente-ui. Return completeness complete with no missing fields. This is a proposal for user review, not a claim about the original post."
         },
         {
           role: "user",
@@ -416,9 +500,16 @@ async function suggestRecipeCompletion(body: ParsedBody, apiKey: string) {
   try {
     const recipe = JSON.parse(outputText) as Record<string, unknown>;
     if (isRecord(body.recipe) && typeof body.recipe.imageUrl === "string") recipe.imageUrl = body.recipe.imageUrl;
-    return json({ recipe, model }, 200);
-  } catch {
-    return json({ error: "De importservice gaf een ongeldig AI-voorstel terug.", rawOutput: outputText }, 502);
+    const localizedRecipe = await localizeRecipeToDutch(recipe, apiKey);
+    return json({ recipe: localizedRecipe, model }, 200);
+  } catch (error) {
+    return json(
+      {
+        error: "Het AI-voorstel kon niet volledig naar het Nederlands worden vertaald.",
+        details: error instanceof Error ? error.message : undefined
+      },
+      502
+    );
   }
 }
 
