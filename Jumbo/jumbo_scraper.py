@@ -28,6 +28,7 @@ from typing import Any
 from urllib.parse import quote, urljoin
 
 import httpx
+from curl_cffi import requests as curl_requests
 
 
 BASE_URL = "https://www.jumbo.com"
@@ -343,12 +344,12 @@ def graphql_headers(client_version: str) -> dict[str, str]:
     }
 
 
-async def discover_client_version(client: httpx.AsyncClient) -> str:
+async def discover_client_version(client: Any) -> str:
     """Read the current Nuxt app version so GraphQL client headers stay fresh."""
     try:
         resp = await client.get(PRODUCTS_URL, timeout=30)
         resp.raise_for_status()
-    except httpx.HTTPError as exc:
+    except curl_requests.errors.RequestsError as exc:
         print(f"Could not refresh Jumbo client version, using fallback: {exc}")
         return CLIENT_VERSION_FALLBACK
 
@@ -359,7 +360,7 @@ async def discover_client_version(client: httpx.AsyncClient) -> str:
 
 
 async def graphql_request(
-    client: httpx.AsyncClient,
+    client: Any,
     *,
     operation_name: str,
     query: str,
@@ -402,7 +403,7 @@ async def graphql_request(
                 messages = "; ".join(str(error.get("message", error)) for error in errors)
                 print(f"  GraphQL warnings on {operation_name}: {messages}")
             return data
-        except (httpx.TimeoutException, httpx.NetworkError) as exc:
+        except curl_requests.errors.RequestsError as exc:
             if attempt == retries:
                 raise
             print(
@@ -450,7 +451,7 @@ def build_search_input(
 
 
 async def fetch_search_page(
-    client: httpx.AsyncClient,
+    client: Any,
     *,
     offset: int,
     query: str | None = None,
@@ -467,7 +468,7 @@ async def fetch_search_page(
 
 
 async def collect_listing(
-    client: httpx.AsyncClient,
+    client: Any,
     *,
     concurrency: int,
     limit: int | None = None,
@@ -514,7 +515,7 @@ async def collect_listing(
 
 
 async def fetch_products_batch(
-    client: httpx.AsyncClient,
+    client: Any,
     skus: list[str],
 ) -> list[dict[str, Any]]:
     data = await graphql_request(
@@ -779,7 +780,9 @@ async def scrape(
     client_version: str | None,
 ) -> list[dict[str, Any]]:
     bootstrap_headers = graphql_headers(client_version or CLIENT_VERSION_FALLBACK)
-    async with httpx.AsyncClient(headers=bootstrap_headers, follow_redirects=True) as client:
+    # Jumbo's GraphQL edge rejects the stock HTTP fingerprint used by hosted CI.
+    # curl_cffi keeps the async flow while impersonating the Chrome TLS/browser stack.
+    async with curl_requests.AsyncSession(headers=bootstrap_headers, impersonate="chrome124") as client:
         if client_version is None:
             version = await discover_client_version(client)
             client.headers.update(graphql_headers(version))
