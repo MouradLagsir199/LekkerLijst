@@ -454,6 +454,50 @@ def parse_category_response(resp: dict) -> tuple[list[dict], int, int]:
     return products, total_pages, total_items
 
 
+def parse_listing_product(product: dict) -> dict:
+    """Map a PLP record to the shared CSV shape without opening every PDP."""
+    categories = [
+        item.get("Name")
+        for item in (product.get("Categories") or {}).get("List", [])
+        if isinstance(item, dict) and item.get("Name")
+    ]
+    slug = product.get("Slug")
+    sku = str(product.get("SKU") or "").strip() or None
+    ean = normalize_gtin(product.get("EAN"))
+    new_price = product.get("NewPrice")
+    original_price = product.get("OriginalPrice")
+    try:
+        price = new_price if float(new_price or 0) > 0 else original_price
+    except (TypeError, ValueError):
+        price = original_price or new_price
+
+    return {
+        "product_id": sku,
+        "gtin": ean,
+        "slug": slug,
+        "title": product.get("Name"),
+        "brand": product.get("Brand"),
+        "subtitle": product.get("Product_Subtitle"),
+        "price": price,
+        "base_unit_price": None,
+        "categories": " > ".join(categories) if categories else None,
+        "ingredients": None,
+        "allergen_warning": None,
+        "allergen_contains": None,
+        "allergen_may_contain": None,
+        "nutriscore": None,
+        "logos": None,
+        "regulated_name": None,
+        "is_nix18": product.get("IsProductOverMajorityAge"),
+        "is_available_in_store": product.get("IsAvailable"),
+        "image_url": product.get("ImageURL"),
+        "url": f"{BASE_URL}/product/{slug}" if slug else None,
+        "nutrients_json": None,
+        "preparation": None,
+        "storage": None,
+    }
+
+
 def _category_record_from_menu_item(item: dict) -> dict | None:
     if not isinstance(item, dict):
         return None
@@ -601,13 +645,15 @@ def cmd_list_categories(args):
 
 
 def scrape_one_category(slug: str, max_pages: int | None,
-                        concurrency: int, sleep_between: float) -> list[dict]:
+                        concurrency: int, sleep_between: float,
+                        no_details: bool = False) -> list[dict]:
     """Scrape all pages of one category, then fetch all product details."""
     s = make_session()
 
     print(f"\n=== Category: {slug} ===")
     all_slugs: list[str] = []
     gtins_by_slug: dict[str, str] = {}
+    listings_by_slug: dict[str, dict] = {}
     page = 1
     total_pages = 1
     while page <= total_pages:
@@ -618,6 +664,8 @@ def scrape_one_category(slug: str, max_pages: int | None,
         for r in rows:
             product_slug = r.get("Slug")
             gtin = normalize_gtin(r.get("EAN"))
+            if product_slug:
+                listings_by_slug[product_slug] = r
             if product_slug and gtin:
                 gtins_by_slug[product_slug] = gtin
         all_slugs.extend(page_slugs)
@@ -632,6 +680,11 @@ def scrape_one_category(slug: str, max_pages: int | None,
     seen = set()
     unique_slugs = [s for s in all_slugs if not (s in seen or seen.add(s))]
     print(f"  unique slugs: {len(unique_slugs)}")
+
+    if no_details:
+        rows = [parse_listing_product(listings_by_slug[product_slug]) for product_slug in unique_slugs if product_slug in listings_by_slug]
+        print(f"  listing-only rows: {len(rows)}")
+        return rows
 
     # Parallel detail fetch — each thread gets its own session
     rows: list[dict] = []
@@ -652,7 +705,7 @@ def scrape_one_category(slug: str, max_pages: int | None,
 
 def cmd_scrape_category(args):
     rows = scrape_one_category(args.category, args.max_pages,
-                               args.concurrency, args.sleep)
+                               args.concurrency, args.sleep, args.no_details)
     save_csv(rows, args.out)
 
 
@@ -665,7 +718,7 @@ def cmd_scrape_all(args):
     all_rows: list[dict] = []
     for slug in slugs:
         rows = scrape_one_category(slug, args.max_pages,
-                                   args.concurrency, args.sleep)
+                                   args.concurrency, args.sleep, args.no_details)
         all_rows.extend(rows)
         save_csv(all_rows, args.out)   # progress save after each category
     save_csv(all_rows, args.out)
@@ -680,7 +733,7 @@ def save_csv(rows: list[dict], path: str):
           .reset_index(drop=True)
           .reindex(columns=CSV_COLUMNS))
     df.to_csv(path, index=False, encoding="utf-8-sig", quoting=csv.QUOTE_MINIMAL)
-    print(f"  → saved {len(df)} unique products to {Path(path).resolve()}")
+    print(f"  -> saved {len(df)} unique products to {Path(path).resolve()}")
 
 
 def main():
@@ -695,6 +748,8 @@ def main():
                     help="Scrape every top-level category discovered from the live PLUS menu")
     ap.add_argument("--out",          default="plus_products.csv")
     ap.add_argument("--concurrency",  type=int, default=6)
+    ap.add_argument("--no-details", action="store_true",
+                    help="Save product-list fields only; suitable for daily price/catalog refreshes")
     ap.add_argument("--sleep",        type=float, default=0.3,
                     help="Seconds to sleep between category pages")
     ap.add_argument("--max-pages",    type=int, default=None)

@@ -38,16 +38,16 @@ jobs:
         run: mkdir -p data/raw
       - name: Scrape AH
         if: matrix.store == 'ah' && (github.event_name == 'schedule' || inputs.store == 'all' || inputs.store == matrix.store)
-        run: python AH/ah_scraper.py --out data/raw/ah_products.csv --concurrency 6
+        run: python AH/ah_scraper.py --out data/raw/ah_products.csv --concurrency 6 --no-gtin-details
       - name: Scrape Jumbo
         if: matrix.store == 'jumbo' && (github.event_name == 'schedule' || inputs.store == 'all' || inputs.store == matrix.store)
-        run: python Jumbo/jumbo_scraper.py --all --out data/raw/jumbo_products.csv --concurrency 2
+        run: python Jumbo/jumbo_scraper.py --all --out data/raw/jumbo_products.csv --concurrency 2 --no-details
       - name: Scrape Dirk
         if: matrix.store == 'dirk' && (github.event_name == 'schedule' || inputs.store == 'all' || inputs.store == matrix.store)
-        run: python Dirk/dirk_scraper.py --all --out data/raw/dirk_products.csv --concurrency 6
+        run: python Dirk/dirk_scraper.py --all --out data/raw/dirk_products.csv --concurrency 6 --no-details
       - name: Scrape PLUS
         if: matrix.store == 'plus' && (github.event_name == 'schedule' || inputs.store == 'all' || inputs.store == matrix.store)
-        run: python Plus/plus_scraper.py --all --out data/raw/plus_products.csv --concurrency 6
+        run: python Plus/plus_scraper.py --all --out data/raw/plus_products.csv --concurrency 6 --no-details
       - name: Upload bronze and write silver
         if: github.event_name == 'schedule' || inputs.store == 'all' || inputs.store == matrix.store
         run: python scrapers/catalog_pipeline.py ingest --store ${{ matrix.store }} --csv data/raw/${{ matrix.store }}_products.csv

@@ -37,6 +37,28 @@ class PlusVersionRefreshTests(unittest.TestCase):
         finally:
             plus_scraper.MODULE_VERSION = old_token
 
+    def test_listing_product_uses_regular_price_when_promotion_price_is_zero(self) -> None:
+        product = plus_scraper.parse_listing_product(
+            {
+                "SKU": "565917",
+                "EAN": "8712345678901",
+                "Slug": "plus-asperges-565917",
+                "Name": "PLUS Asperges wit",
+                "Brand": "PLUS",
+                "Product_Subtitle": "Per 500 g",
+                "NewPrice": "0.0",
+                "OriginalPrice": "5.99",
+                "ImageURL": "https://example.test/asparagus.png",
+                "IsAvailable": True,
+                "Categories": {"List": [{"Name": "Groente"}]},
+            }
+        )
+
+        self.assertEqual(product["product_id"], "565917")
+        self.assertEqual(product["gtin"], "8712345678901")
+        self.assertEqual(product["price"], "5.99")
+        self.assertEqual(product["categories"], "Groente")
+
 
 if __name__ == "__main__":
     unittest.main()
