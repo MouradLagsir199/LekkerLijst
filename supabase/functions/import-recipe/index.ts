@@ -182,19 +182,19 @@ Deno.serve(async (request) => {
   }
 
   if (request.method !== "POST") {
-    return json({ error: "Method not allowed" }, 405);
+    return json({ error: "Methode niet toegestaan" }, 405);
   }
 
   const apiKey = Deno.env.get("OPENAI_API_KEY");
   if (!apiKey) {
-    return json({ error: "OPENAI_API_KEY is not configured for this function" }, 500);
+    return json({ error: "De importservice is niet geconfigureerd." }, 500);
   }
 
   let body: ParsedBody;
   try {
     body = await request.json();
   } catch {
-    return json({ error: "Request body must be JSON" }, 400);
+    return json({ error: "De aanvraag moet geldige JSON bevatten." }, 400);
   }
 
   if (body.action === "suggest_completion") {
@@ -205,7 +205,7 @@ Deno.serve(async (request) => {
   const sourceUrl = body.sourceUrl?.trim() ?? "";
 
   if (!rawText && !sourceUrl) {
-    return json({ error: "rawText or sourceUrl is required" }, 400);
+    return json({ error: "Vul recepttekst in of plak een link." }, 400);
   }
 
   if (sourceUrl && !isSupportedHttpUrl(sourceUrl)) {
@@ -219,7 +219,7 @@ Deno.serve(async (request) => {
   }
 
   if (rawText.length > 12_000) {
-    return json({ error: "Recipe text is too long for this import path" }, 413);
+    return json({ error: "De recepttekst is te lang om in een keer te importeren." }, 413);
   }
 
   let linkContext: LinkContext | null = null;
@@ -313,7 +313,7 @@ Deno.serve(async (request) => {
   if (!openAiResponse.ok) {
     return json(
       {
-        error: "OpenAI recipe parsing failed",
+        error: "Het recept kon niet worden geparseerd.",
         details: openAiJson.error?.message ?? openAiJson
       },
       502
@@ -322,7 +322,7 @@ Deno.serve(async (request) => {
 
   const outputText = extractOutputText(openAiJson);
   if (!outputText) {
-    return json({ error: "OpenAI returned no structured recipe text" }, 502);
+    return json({ error: "De importservice gaf geen bruikbaar recept terug." }, 502);
   }
 
   try {
@@ -331,7 +331,7 @@ Deno.serve(async (request) => {
     normalizeCompleteness(recipe);
     return json({ recipe, model, source: linkContext, completionSourceText: sourceText.slice(0, 12_000) }, 200);
   } catch {
-    return json({ error: "OpenAI returned invalid JSON", rawOutput: outputText }, 502);
+    return json({ error: "De importservice gaf een ongeldig recept terug.", rawOutput: outputText }, 502);
   }
 });
 
@@ -356,7 +356,7 @@ function normalizeCompleteness(recipe: Record<string, unknown>) {
 async function suggestRecipeCompletion(body: ParsedBody, apiKey: string) {
   const sourceText = body.sourceText?.trim().slice(0, 12_000) ?? "";
   if (!body.recipe || !sourceText) {
-    return json({ error: "recipe and sourceText are required for an AI proposal" }, 400);
+    return json({ error: "Een recept en brontekst zijn nodig voor een AI-voorstel." }, 400);
   }
 
   const servings = typeof body.servings === "number" && body.servings > 0 ? body.servings : null;
@@ -401,7 +401,7 @@ async function suggestRecipeCompletion(body: ParsedBody, apiKey: string) {
   if (!openAiResponse.ok) {
     return json(
       {
-        error: "OpenAI recipe completion failed",
+        error: "Het AI-voorstel kon niet worden gemaakt.",
         details: openAiJson.error?.message ?? openAiJson
       },
       502
@@ -410,7 +410,7 @@ async function suggestRecipeCompletion(body: ParsedBody, apiKey: string) {
 
   const outputText = extractOutputText(openAiJson);
   if (!outputText) {
-    return json({ error: "OpenAI returned no completion proposal" }, 502);
+    return json({ error: "De importservice gaf geen AI-voorstel terug." }, 502);
   }
 
   try {
@@ -418,7 +418,7 @@ async function suggestRecipeCompletion(body: ParsedBody, apiKey: string) {
     if (isRecord(body.recipe) && typeof body.recipe.imageUrl === "string") recipe.imageUrl = body.recipe.imageUrl;
     return json({ recipe, model }, 200);
   } catch {
-    return json({ error: "OpenAI returned invalid proposal JSON", rawOutput: outputText }, 502);
+    return json({ error: "De importservice gaf een ongeldig AI-voorstel terug.", rawOutput: outputText }, 502);
   }
 }
 
