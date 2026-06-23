@@ -112,12 +112,12 @@ Text must fit within its container on mobile. Prefer wrapping over shrinking unl
 - Offer the next seven days as quick date choices and an `Andere datum` control for any later date.
 - The Boodschappen tab shows upcoming lists first, followed by a month calendar with a visible marker on scheduled shopping days.
 - Check-off items use real checkbox UI only inside a scheduled shopping-list detail screen, not `[ ]` or `[x]`.
-- Product replacement should be visible but secondary.
+- Stores and variants should be visible but secondary; never label this action `Vervang product`.
 - Price and store/product details should be scan-friendly.
 
 ## Incomplete Imports
 
-- Social imports first use public metadata/captions. Every Instagram Reel then also attempts a transcript; a non-video Instagram post only uses the transcript fallback when its caption has no usable recipe text.
+- Social imports first use public metadata/captions. Every Instagram Reel then also attempts a transcript; when the dedicated actor cannot resolve its audio, the cross-platform transcript actor is used automatically. A non-video Instagram post only uses the transcript fallback when its caption has no usable recipe text.
 - Never silently invent missing quantities, servings, ingredients, or cut-off steps from a source.
 - An incomplete import shows a clear `Recept incompleet` panel with its missing fields.
 - AI completion is an explicit `AI-voorstel`; suggested fields stay visibly marked until the user accepts them.
