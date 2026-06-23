@@ -144,6 +144,14 @@ export default function RecipeDetailScreen() {
       <View style={styles.heading}>
         <View style={styles.titleRow}>
           <Text style={styles.title}>{recipe.title}</Text>
+          <Pressable
+            accessibilityLabel="Recept bewerken"
+            accessibilityRole="button"
+            onPress={() => router.push({ pathname: "/review", params: { recipeId: recipe.id } })}
+            style={styles.editIconButton}
+          >
+            <Pencil color={colors.primaryDark} size={19} strokeWidth={2.4} />
+          </Pressable>
           <Pressable accessibilityLabel="Recept verwijderen" accessibilityRole="button" disabled={deleting} onPress={confirmDelete} style={styles.deleteButton}>
             {deleting ? <ActivityIndicator color={colors.danger} size="small" /> : <Trash2 color={colors.danger} size={19} strokeWidth={2.4} />}
           </Pressable>
@@ -367,6 +375,16 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     backgroundColor: "#fff7f7"
+  },
+  editIconButton: {
+    width: 38,
+    height: 38,
+    borderRadius: radii.sm,
+    borderWidth: 1,
+    borderColor: colors.primary,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: colors.primarySoft
   },
   meta: {
     color: colors.muted,

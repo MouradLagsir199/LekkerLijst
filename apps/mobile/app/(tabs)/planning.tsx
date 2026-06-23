@@ -17,6 +17,7 @@ type RecipeOption = {
 
 type MealItem = {
   id: string;
+  created_at: string;
   planned_for: string;
   meal_slot: "breakfast" | "lunch" | "dinner";
   recipe_id: string | null;
@@ -33,11 +34,12 @@ type MealPlan = {
 
 type EditorState = {
   dateKey: string;
-  slot: "lunch" | "dinner";
+  slot: "breakfast" | "lunch" | "dinner";
   existing?: MealItem;
 };
 
-const mealSlots: Array<{ key: "lunch" | "dinner"; label: string }> = [
+const mealSlots: Array<{ key: "breakfast" | "lunch" | "dinner"; label: string }> = [
+  { key: "breakfast", label: "Ontbijt" },
   { key: "lunch", label: "Lunch" },
   { key: "dinner", label: "Avondeten" }
 ];
@@ -61,7 +63,7 @@ export default function PlanningTab() {
     queryFn: async () => {
       const { data, error } = await supabase
         .from("meal_plans")
-        .select("id,week_start,meal_plan_items(id,planned_for,meal_slot,recipe_id,custom_title,note,recipes(title,image_url))")
+        .select("id,week_start,meal_plan_items(id,created_at,planned_for,meal_slot,recipe_id,custom_title,note,recipes(title,image_url))")
         .eq("week_start", weekKey)
         .maybeSingle();
       if (error) throw error;
@@ -79,14 +81,16 @@ export default function PlanningTab() {
   });
 
   const itemsByDayAndSlot = useMemo(() => {
-    const items = new Map<string, MealItem>();
+    const items = new Map<string, MealItem[]>();
     for (const item of plan.data?.meal_plan_items ?? []) {
-      items.set(`${item.planned_for}:${item.meal_slot}`, item);
+      const key = `${item.planned_for}:${item.meal_slot}`;
+      items.set(key, [...(items.get(key) ?? []), item]);
     }
+    for (const groupedItems of items.values()) groupedItems.sort((left, right) => left.created_at.localeCompare(right.created_at));
     return items;
   }, [plan.data]);
 
-  function openEditor(dateKey: string, slot: "lunch" | "dinner", existing?: MealItem) {
+  function openEditor(dateKey: string, slot: "breakfast" | "lunch" | "dinner", existing?: MealItem) {
     setEditor({ dateKey, slot, existing });
     setSelectedRecipeId(existing?.recipe_id ?? null);
     setCustomTitle(existing?.custom_title ?? "");
@@ -186,25 +190,37 @@ export default function PlanningTab() {
                 <Text style={styles.dayDate}>{day.dateLabel}</Text>
               </View>
               {mealSlots.map((slot) => {
-                const item = itemsByDayAndSlot.get(`${day.key}:${slot.key}`);
+                const items = itemsByDayAndSlot.get(`${day.key}:${slot.key}`) ?? [];
                 return (
-                  <Pressable
-                    accessibilityRole="button"
-                    key={slot.key}
-                    onPress={() => openEditor(day.key, slot.key, item)}
-                    style={({ pressed }) => [styles.mealRow, item && styles.mealRowFilled, pressed && styles.pressed]}
-                  >
-                    <View style={styles.slotLabel}>
+                  <View key={slot.key} style={styles.slotGroup}>
+                    <View style={styles.slotHeader}>
                       <Text style={styles.slotText}>{slot.label}</Text>
+                      {items.length ? <Text style={styles.slotCount}>{items.length} gepland</Text> : null}
                     </View>
-                    <View style={styles.mealCopy}>
-                      <Text numberOfLines={1} style={[styles.mealTitle, !item && styles.mealEmpty]}>
-                        {item ? item.recipes?.title ?? item.custom_title : "Maaltijd toevoegen"}
-                      </Text>
-                      {item?.note ? <Text numberOfLines={1} style={styles.mealNote}>{item.note}</Text> : null}
-                    </View>
-                    {item ? <NotebookPen color={colors.primaryDark} size={18} strokeWidth={2.3} /> : <Plus color={colors.primaryDark} size={20} strokeWidth={2.3} />}
-                  </Pressable>
+                    {items.map((item) => (
+                      <Pressable
+                        accessibilityRole="button"
+                        key={item.id}
+                        onPress={() => openEditor(day.key, slot.key, item)}
+                        style={({ pressed }) => [styles.mealRow, styles.mealRowFilled, pressed && styles.pressed]}
+                      >
+                        <View style={styles.mealCopy}>
+                          <Text numberOfLines={1} style={styles.mealTitle}>{item.recipes?.title ?? item.custom_title}</Text>
+                          {item.note ? <Text numberOfLines={1} style={styles.mealNote}>{item.note}</Text> : null}
+                        </View>
+                        <NotebookPen color={colors.primaryDark} size={18} strokeWidth={2.3} />
+                      </Pressable>
+                    ))}
+                    <Pressable
+                      accessibilityLabel={`${slot.label} toevoegen op ${day.label}`}
+                      accessibilityRole="button"
+                      onPress={() => openEditor(day.key, slot.key)}
+                      style={({ pressed }) => [styles.addMealRow, pressed && styles.pressed]}
+                    >
+                      <Plus color={colors.primaryDark} size={18} strokeWidth={2.4} />
+                      <Text style={styles.addMealText}>{items.length ? "Nog een maaltijd toevoegen" : "Maaltijd toevoegen"}</Text>
+                    </Pressable>
+                  </View>
                 );
               })}
             </View>
@@ -311,7 +327,8 @@ function formatDay(dateKey: string) {
   return new Intl.DateTimeFormat("nl-NL", { weekday: "long", day: "numeric", month: "long" }).format(new Date(`${dateKey}T12:00:00`));
 }
 
-function slotLabel(slot: "lunch" | "dinner") {
+function slotLabel(slot: "breakfast" | "lunch" | "dinner") {
+  if (slot === "breakfast") return "Ontbijt";
   return slot === "lunch" ? "Lunch" : "Avondeten";
 }
 
@@ -329,14 +346,17 @@ const styles = StyleSheet.create({
   dayHeader: { flexDirection: "row", alignItems: "baseline", justifyContent: "space-between", paddingHorizontal: spacing.xs },
   dayName: { color: colors.text, ...typography.cardTitle },
   dayDate: { color: colors.primaryDark, fontSize: 13, lineHeight: 18, fontWeight: "800" },
+  slotGroup: { gap: spacing.xs },
+  slotHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: spacing.xs },
+  slotCount: { color: colors.muted, fontSize: 12, lineHeight: 16 },
   mealRow: { minHeight: 56, borderRadius: radii.sm, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface, flexDirection: "row", alignItems: "center", gap: spacing.sm, padding: spacing.sm },
   mealRowFilled: { borderColor: colors.primary },
-  slotLabel: { width: 76 },
   slotText: { color: colors.muted, fontSize: 12, lineHeight: 16, fontWeight: "800" },
   mealCopy: { flex: 1, gap: 2 },
   mealTitle: { color: colors.text, ...typography.label },
-  mealEmpty: { color: colors.primaryDark },
   mealNote: { color: colors.muted, fontSize: 12, lineHeight: 16 },
+  addMealRow: { minHeight: 42, borderRadius: radii.sm, borderWidth: 1, borderStyle: "dashed", borderColor: colors.primary, backgroundColor: colors.primarySoft, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6, paddingHorizontal: spacing.sm },
+  addMealText: { color: colors.primaryDark, fontSize: 13, lineHeight: 17, fontWeight: "800" },
   modalBackdrop: { flex: 1, justifyContent: "flex-end", backgroundColor: "rgba(5, 5, 5, 0.25)" },
   modal: { maxHeight: "86%", borderTopLeftRadius: radii.lg, borderTopRightRadius: radii.lg, backgroundColor: colors.surface, gap: spacing.md, padding: spacing.lg, ...shadows.card },
   modalHeader: { flexDirection: "row", alignItems: "flex-start", justifyContent: "space-between", gap: spacing.md },

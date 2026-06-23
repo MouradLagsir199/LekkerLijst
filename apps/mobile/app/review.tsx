@@ -1,9 +1,9 @@
 import type { ParsedIngredient, ParsedInstruction, ParsedRecipe } from "@recipe-nl/shared";
 import { ParsedRecipeSchema } from "@recipe-nl/shared";
 import * as ImagePicker from "expo-image-picker";
-import { useRouter } from "expo-router";
-import { AlertTriangle, Camera, CheckCircle2, Link2, Sparkles } from "lucide-react-native";
-import { useMemo, useState, type ReactNode } from "react";
+import { Stack, useLocalSearchParams, useRouter } from "expo-router";
+import { AlertTriangle, Camera, CheckCircle2, Link2, Plus, Sparkles, Trash2 } from "lucide-react-native";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { ActivityIndicator, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
 
 import { Screen } from "../components/Screen";
@@ -16,16 +16,50 @@ import { colors, radii, shadows, spacing, typography } from "../lib/theme";
 
 export default function ReviewScreen() {
   const router = useRouter();
+  const params = useLocalSearchParams<{ recipeId?: string }>();
   const { session } = useAuth();
   const initialDraft = useMemo(() => getImportDraft(), []);
-  const [recipe, setRecipe] = useState<ParsedRecipe | null>(initialDraft?.recipe ?? null);
-  const [sourceText, setSourceText] = useState(initialDraft?.sourceText ?? "");
-  const [recipeId, setRecipeId] = useState(initialDraft?.recipeId);
+  const existingRecipeId = typeof params.recipeId === "string" ? params.recipeId : undefined;
+  const editingExistingRecipe = Boolean(existingRecipeId);
+  const [recipe, setRecipe] = useState<ParsedRecipe | null>(editingExistingRecipe ? null : initialDraft?.recipe ?? null);
+  const [sourceText, setSourceText] = useState(editingExistingRecipe ? "" : initialDraft?.sourceText ?? "");
+  const [recipeId, setRecipeId] = useState<string | undefined>(editingExistingRecipe ? existingRecipeId : initialDraft?.recipeId);
   const [bioUrl, setBioUrl] = useState("");
   const [aiProposal, setAiProposal] = useState(false);
   const [busy, setBusy] = useState<"save" | "proposal" | "bio" | null>(null);
   const [uploadingImage, setUploadingImage] = useState(false);
+  const [loadingExistingRecipe, setLoadingExistingRecipe] = useState(editingExistingRecipe);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!existingRecipeId) return;
+    let active = true;
+
+    async function loadRecipe() {
+      setLoadingExistingRecipe(true);
+      const { data, error: loadError } = await supabase
+        .from("recipes")
+        .select(
+          "id,title,description,servings,prep_time_minutes,cook_time_minutes,total_time_minutes,source_url,source_platform,confidence_score,image_url,tags,completion_status,missing_fields,recipe_ingredients(raw_text,quantity,unit,ingredient_name,normalized_ingredient_name,dutch_ingredient_name,preparation,optional,ingredient_source,quantity_source,sort_order),recipe_instructions(step_number,instruction,provenance)"
+        )
+        .eq("id", existingRecipeId)
+        .single();
+      if (!active) return;
+      if (loadError) {
+        setError(loadError.message);
+        setLoadingExistingRecipe(false);
+        return;
+      }
+      setRecipe(toEditableRecipe(data));
+      setRecipeId(data.id);
+      setLoadingExistingRecipe(false);
+    }
+
+    void loadRecipe();
+    return () => {
+      active = false;
+    };
+  }, [existingRecipeId]);
 
   async function save(markComplete: boolean) {
     if (!recipe || !session) return;
@@ -33,6 +67,12 @@ export default function ReviewScreen() {
     const finalRecipe: ParsedRecipe = markComplete
       ? { ...recipe, completeness: { status: "complete", missingFields: [] } }
       : recipe;
+
+    const validatedRecipe = ParsedRecipeSchema.safeParse(finalRecipe);
+    if (!validatedRecipe.success) {
+      setError(`Controleer het recept: ${validatedRecipe.error.issues[0]?.message ?? "ongeldige gegevens"}`);
+      return;
+    }
 
     setBusy("save");
     setError(null);
@@ -42,14 +82,14 @@ export default function ReviewScreen() {
         supabase,
         userId: session.user.id,
         recipeId,
-        recipe: finalRecipe,
-        ingredients: finalRecipe.ingredients,
-        instructions: finalRecipe.instructions
+        recipe: validatedRecipe.data,
+        ingredients: validatedRecipe.data.ingredients,
+        instructions: validatedRecipe.data.instructions
       });
 
-      if (finalRecipe.completeness.status === "incomplete") {
+      if (!editingExistingRecipe && validatedRecipe.data.completeness.status === "incomplete") {
         setRecipeId(result.recipeId);
-        setImportDraft({ recipe: finalRecipe, sourceText, recipeId: result.recipeId });
+        setImportDraft({ recipe: validatedRecipe.data, sourceText, recipeId: result.recipeId });
       } else {
         clearImportDraft();
       }
@@ -179,11 +219,68 @@ export default function ReviewScreen() {
     });
   }
 
+  function addIngredient() {
+    setRecipe((current) =>
+      current
+        ? {
+            ...current,
+            ingredients: [
+              ...current.ingredients,
+              {
+                rawText: "",
+                quantity: null,
+                unit: null,
+                ingredientName: "",
+                normalizedIngredientName: null,
+                dutchIngredientName: null,
+                preparation: null,
+                optional: false,
+                ingredientSource: "source",
+                quantitySource: "missing"
+              }
+            ]
+          }
+        : current
+    );
+  }
+
+  function removeIngredient(index: number) {
+    setRecipe((current) =>
+      current && current.ingredients.length > 1
+        ? { ...current, ingredients: current.ingredients.filter((_, ingredientIndex) => ingredientIndex !== index) }
+        : current
+    );
+  }
+
+  function addInstruction() {
+    setRecipe((current) =>
+      current ? { ...current, instructions: [...current.instructions, { text: "", source: "source" }] } : current
+    );
+  }
+
+  function removeInstruction(index: number) {
+    setRecipe((current) =>
+      current && current.instructions.length > 1
+        ? { ...current, instructions: current.instructions.filter((_, instructionIndex) => instructionIndex !== index) }
+        : current
+    );
+  }
+
+  if (loadingExistingRecipe) {
+    return (
+      <Screen style={styles.loading}>
+        <Stack.Screen options={{ title: "Recept bewerken" }} />
+        <ActivityIndicator color={colors.primaryDark} />
+      </Screen>
+    );
+  }
+
   if (!recipe) {
     return (
       <Screen>
-        <Text style={styles.title}>Geen import gevonden</Text>
-        <ActionButton label="Opnieuw importeren" onPress={() => router.replace("/import")} />
+        <Stack.Screen options={{ title: editingExistingRecipe ? "Recept bewerken" : "Controleer recept" }} />
+        <Text style={styles.title}>{editingExistingRecipe ? "Recept niet gevonden" : "Geen import gevonden"}</Text>
+        <ActionButton label={editingExistingRecipe ? "Terug naar recepten" : "Opnieuw importeren"} onPress={() => router.replace(editingExistingRecipe ? "/recipes" : "/import")} />
       </Screen>
     );
   }
@@ -195,16 +292,18 @@ export default function ReviewScreen() {
     recipe.servings !== null &&
     recipe.servings !== undefined &&
     recipe.servings > 0 &&
+    recipe.ingredients.every((ingredient) => ingredient.ingredientName.trim().length > 0) &&
     !hasMissingQuantities &&
     recipe.instructions.every((instruction) => instruction.text.trim().length > 0);
   const isSaving = busy === "save";
 
   return (
     <Screen>
-      <Text style={styles.title}>Controleer je recept</Text>
-      <Text style={styles.confidence}>AI vertrouwen: {Math.round(recipe.confidenceScore * 100)}%</Text>
+      <Stack.Screen options={{ title: editingExistingRecipe ? "Recept bewerken" : "Controleer recept" }} />
+      <Text style={styles.title}>{editingExistingRecipe ? "Recept bewerken" : "Controleer je recept"}</Text>
+      {!editingExistingRecipe ? <Text style={styles.confidence}>AI vertrouwen: {Math.round(recipe.confidenceScore * 100)}%</Text> : null}
 
-      {incomplete ? (
+      {incomplete && !editingExistingRecipe ? (
         <View style={styles.incompletePanel}>
           <View style={styles.panelHeading}>
             <AlertTriangle color={colors.danger} size={22} strokeWidth={2.3} />
@@ -273,7 +372,12 @@ export default function ReviewScreen() {
 
       <View style={styles.fieldHeader}>
         <Text style={styles.label}>Ingredienten</Text>
-        {hasMissingQuantities ? <Text style={styles.missingLabel}>Hoeveelheden ontbreken</Text> : null}
+        <View style={styles.fieldActions}>
+          {hasMissingQuantities ? <Text style={styles.missingLabel}>Hoeveelheden ontbreken</Text> : null}
+          <Pressable accessibilityLabel="Ingrediënt toevoegen" accessibilityRole="button" onPress={addIngredient} style={styles.addIconButton}>
+            <Plus color={colors.primaryDark} size={18} strokeWidth={2.5} />
+          </Pressable>
+        </View>
       </View>
       <View style={styles.ingredientList}>
         {recipe.ingredients.map((ingredient, index) => (
@@ -316,13 +420,27 @@ export default function ReviewScreen() {
                 style={[styles.ingredientInput, ingredient.ingredientSource === "ai_suggestion" && styles.aiInput]}
                 value={ingredient.ingredientName}
               />
+              <Pressable
+                accessibilityLabel={`${ingredient.ingredientName || "Ingrediënt"} verwijderen`}
+                accessibilityRole="button"
+                disabled={recipe.ingredients.length === 1}
+                onPress={() => removeIngredient(index)}
+                style={[styles.rowIconButton, recipe.ingredients.length === 1 && styles.disabled]}
+              >
+                <Trash2 color={colors.danger} size={17} strokeWidth={2.4} />
+              </Pressable>
             </View>
             <ProvenanceLabel ingredient={ingredient} />
           </View>
         ))}
       </View>
 
-      <Text style={styles.label}>Bereiding</Text>
+      <View style={styles.fieldHeader}>
+        <Text style={styles.label}>Bereiding</Text>
+        <Pressable accessibilityLabel="Bereidingsstap toevoegen" accessibilityRole="button" onPress={addInstruction} style={styles.addIconButton}>
+          <Plus color={colors.primaryDark} size={18} strokeWidth={2.5} />
+        </Pressable>
+      </View>
       <View style={styles.instructionList}>
         {recipe.instructions.map((instruction, index) => (
           <View key={index} style={styles.instructionRow}>
@@ -337,6 +455,15 @@ export default function ReviewScreen() {
               />
               {instruction.source === "ai_suggestion" ? <Text style={styles.aiLabel}>AI-voorstel</Text> : null}
             </View>
+            <Pressable
+              accessibilityLabel={`Stap ${index + 1} verwijderen`}
+              accessibilityRole="button"
+              disabled={recipe.instructions.length === 1}
+              onPress={() => removeInstruction(index)}
+              style={[styles.rowIconButton, recipe.instructions.length === 1 && styles.disabled]}
+            >
+              <Trash2 color={colors.danger} size={17} strokeWidth={2.4} />
+            </Pressable>
           </View>
         ))}
       </View>
@@ -426,6 +553,50 @@ function buildRawText(quantity: number | null | undefined, unit: string | null |
   return [quantity ?? "", unit ?? "", ingredientName].filter(Boolean).join(" ");
 }
 
+function toEditableRecipe(row: any): ParsedRecipe {
+  const sourcePlatform = ["instagram", "tiktok", "youtube", "facebook", "pinterest", "blog", "manual"].includes(row.source_platform)
+    ? row.source_platform
+    : "manual";
+
+  return {
+    title: row.title,
+    description: row.description ?? null,
+    servings: row.servings ?? null,
+    prepTimeMinutes: row.prep_time_minutes ?? null,
+    cookTimeMinutes: row.cook_time_minutes ?? null,
+    totalTimeMinutes: row.total_time_minutes ?? null,
+    ingredients: [...(row.recipe_ingredients ?? [])]
+      .sort((left, right) => left.sort_order - right.sort_order)
+      .map((ingredient: any) => ({
+        rawText: ingredient.raw_text || buildRawText(ingredient.quantity, ingredient.unit, ingredient.ingredient_name),
+        quantity: ingredient.quantity ?? null,
+        unit: ingredient.unit ?? null,
+        ingredientName: ingredient.ingredient_name,
+        normalizedIngredientName: ingredient.normalized_ingredient_name ?? null,
+        dutchIngredientName: ingredient.dutch_ingredient_name ?? null,
+        preparation: ingredient.preparation ?? null,
+        optional: Boolean(ingredient.optional),
+        ingredientSource: ingredient.ingredient_source === "ai_suggestion" ? "ai_suggestion" : "source",
+        quantitySource: ingredient.quantity_source === "ai_suggestion" ? "ai_suggestion" : ingredient.quantity_source === "missing" ? "missing" : "source"
+      })),
+    instructions: [...(row.recipe_instructions ?? [])]
+      .sort((left, right) => left.step_number - right.step_number)
+      .map((instruction: any) => ({
+        text: instruction.instruction,
+        source: instruction.provenance === "ai_suggestion" ? "ai_suggestion" : "source"
+      })),
+    tags: row.tags ?? [],
+    imageUrl: row.image_url ?? null,
+    sourceUrl: row.source_url ?? null,
+    sourcePlatform,
+    confidenceScore: typeof row.confidence_score === "number" ? row.confidence_score : 1,
+    completeness:
+      row.completion_status === "incomplete"
+        ? { status: "incomplete", missingFields: row.missing_fields ?? [] }
+        : { status: "complete", missingFields: [] }
+  };
+}
+
 function formatMissingFields(fields: string[]) {
   const labels = {
     quantities: "hoeveelheden",
@@ -464,6 +635,9 @@ async function getFunctionErrorMessage(error: unknown) {
 }
 
 const styles = StyleSheet.create({
+  loading: {
+    justifyContent: "center"
+  },
   title: {
     color: colors.text,
     ...typography.sectionTitle
@@ -545,6 +719,19 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
     gap: spacing.sm
   },
+  fieldActions: {
+    alignItems: "center",
+    flexDirection: "row",
+    gap: spacing.sm
+  },
+  addIconButton: {
+    width: 34,
+    height: 34,
+    borderRadius: radii.sm,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: colors.primarySoft
+  },
   input: {
     minHeight: 48,
     borderRadius: radii.sm,
@@ -598,6 +785,13 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     paddingHorizontal: 8,
     fontSize: 15
+  },
+  rowIconButton: {
+    width: 34,
+    height: 34,
+    borderRadius: radii.sm,
+    alignItems: "center",
+    justifyContent: "center"
   },
   aiInput: {
     borderColor: colors.primaryDark,
