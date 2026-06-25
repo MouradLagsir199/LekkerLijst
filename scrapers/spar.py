@@ -138,11 +138,23 @@ def product_id_from_url(url: str) -> str | None:
     return match.group(1) if match else None
 
 
+def clean_sitemap_url(value: str) -> str | None:
+    """Normalize a sitemap <loc> into a requestable URL.
+
+    SPAR's product sitemap can contain embedded control characters, e.g. a tab
+    in the middle of a URL. httpx rejects those before any network request, so
+    strip ASCII control characters at parse time.
+    """
+    url = unescape(value)
+    url = re.sub(r"[\x00-\x1f\x7f]+", "", url).strip()
+    return url or None
+
+
 def parse_sitemap_locs(xml_text: str) -> list[str]:
     urls: list[str] = []
     seen: set[str] = set()
     for match in LOC_RE.finditer(xml_text):
-        url = unescape(match.group(1).strip())
+        url = clean_sitemap_url(match.group(1))
         if url and url not in seen:
             urls.append(url)
             seen.add(url)
@@ -470,6 +482,9 @@ async def fetch_product(
         for attempt in range(1, retries + 1):
             try:
                 resp = await client.get(url, timeout=60.0)
+            except httpx.InvalidURL as error:
+                print(f"  ! invalid SPAR URL skipped: {url!r} ({error})")
+                return None
             except (httpx.TimeoutException, httpx.NetworkError):
                 if attempt == retries:
                     return None
@@ -513,7 +528,12 @@ async def run(*, limit: int | None) -> None:
         skipped = 0
         with JsonlWriter(out_path) as writer:
             for done, task in enumerate(asyncio.as_completed(tasks), start=1):
-                envelope = await task
+                try:
+                    envelope = await task
+                except Exception as error:  # keep one malformed page from killing the run
+                    print(f"  ! SPAR product task failed: {type(error).__name__}: {str(error)[:160]}")
+                    skipped += 1
+                    continue
                 if envelope is None:
                     skipped += 1
                     continue
