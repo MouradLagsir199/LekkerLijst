@@ -196,7 +196,11 @@ async def run(*, limit: int | None, no_detail: bool, max_leaves: int | None) -> 
             detail_sem = asyncio.Semaphore(DETAIL_CONCURRENCY)
 
             async def hydrate(wid: str) -> None:
-                details[wid] = await fetch_detail(client, detail_sem, token, int(wid))
+                try:
+                    details[wid] = await fetch_detail(client, detail_sem, token, int(wid))
+                except Exception as error:  # keep the full listing even if one detail endpoint is blocked
+                    print(f"  ! detail {wid} failed: {type(error).__name__}: {str(error)[:160]}")
+                    details[wid] = None
 
             # hydrate in chunks to bound memory and show progress
             for start in range(0, len(ids), 500):
