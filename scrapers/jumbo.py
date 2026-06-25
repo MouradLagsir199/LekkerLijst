@@ -243,6 +243,7 @@ async def hydrate_details(
     sem: asyncio.Semaphore,
     version_holder: list[str],
     skus: list[str],
+    concurrency: int,
 ) -> dict[str, dict]:
     """Batch-fetch product detail by SKU; return a sku -> detail map."""
     details: dict[str, dict] = {}
@@ -257,8 +258,8 @@ async def hydrate_details(
             data = await graphql(client, sem, version_holder[0], "ProductsBatch", variables, DETAIL_QUERY)
         return list((data or {}).get("products") or [])
 
-    for start in range(0, len(chunks), CONCURRENCY):
-        batch = chunks[start : start + CONCURRENCY]
+    for start in range(0, len(chunks), concurrency):
+        batch = chunks[start : start + concurrency]
         results = await asyncio.gather(*(fetch_chunk(c) for c in batch))
         for products in results:
             for prod in products:
@@ -304,7 +305,7 @@ async def run(*, limit: int | None, no_detail: bool, concurrency: int) -> None:
 
         details: dict[str, dict] = {}
         if not no_detail and ids:
-            details = await hydrate_details(client, sem, version_holder, ids)
+            details = await hydrate_details(client, sem, version_holder, ids, concurrency)
 
         with JsonlWriter(out_path) as writer:
             for cid in ids:
