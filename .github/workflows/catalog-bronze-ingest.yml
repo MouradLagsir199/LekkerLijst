@@ -31,7 +31,7 @@ on:
       plus_sleep:
         description: "Delay between PLUS requests."
         required: false
-        default: "0.6"
+        default: "0.1"
         type: string
       plus_detail:
         description: "Run the very slow PLUS PDP detail hydration."
@@ -86,7 +86,7 @@ jobs:
       STORE: ${{ matrix.store }}
       LIMIT: ${{ inputs.limit || '' }}
       NO_DETAIL: ${{ inputs.no_detail || 'false' }}
-      PLUS_SLEEP: ${{ inputs.plus_sleep || '0.6' }}
+      PLUS_SLEEP: ${{ inputs.plus_sleep || '0.1' }}
       PLUS_DETAIL: ${{ inputs.plus_detail || 'false' }}
       SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
 
