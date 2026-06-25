@@ -42,8 +42,10 @@ DETAIL_URL = f"{BASE}/mobile-services/product/detail/v4/fir/{{wid}}"
 USER_AGENT = "Appie/8.22.3"
 PAGE_SIZE = 200
 MAX_PAGES = 30  # AH returns HTTP 400 beyond this for a single taxonomy query
-SEARCH_CONCURRENCY = 6
-DETAIL_CONCURRENCY = 8
+SEARCH_CONCURRENCY = 2
+DETAIL_CONCURRENCY = 4
+SEARCH_RETRY_STATUSES = {403}
+SEARCH_SKIP_STATUSES = {400, 403, 404}
 
 STORE = "ah"
 
@@ -68,8 +70,13 @@ async def request_json(
     json: Any | None = None,
     headers: dict | None = None,
     retries: int = 4,
+    retry_statuses: set[int] | None = None,
+    skip_statuses: set[int] | None = None,
+    context: str | None = None,
 ) -> Any | None:
     """Return parsed JSON, None for 400/404 (skip), raising after exhausting retries."""
+    retry_statuses = retry_statuses or set()
+    skip_statuses = skip_statuses or {400, 404}
     for attempt in range(1, retries + 1):
         try:
             resp = await client.request(method, url, params=params, json=json, headers=headers, timeout=60.0)
@@ -78,11 +85,17 @@ async def request_json(
                 raise
             await backoff_sleep(attempt, base=2.0)
             continue
-        if resp.status_code in (400, 404):
-            return None
-        if should_retry(resp.status_code) and attempt < retries:
+        should_retry_status = should_retry(resp.status_code) or resp.status_code in retry_statuses
+        if should_retry_status and attempt < retries:
+            label = f" {context}" if context else ""
+            print(f"  ! HTTP {resp.status_code}{label}; retry {attempt}/{retries}")
             await backoff_sleep(attempt, base=2.0)
             continue
+        if resp.status_code in skip_statuses:
+            if resp.status_code not in (400, 404):
+                label = f" {context}" if context else ""
+                print(f"  ! HTTP {resp.status_code}{label}; skipping")
+            return None
         resp.raise_for_status()
         return resp.json()
     return None
@@ -126,7 +139,17 @@ async def search_taxonomy(client: httpx.AsyncClient, sem: asyncio.Semaphore, tok
     headers = base_headers(token)
     params0 = {"taxonomyId": taxonomy_id, "adType": "TAXONOMY", "sortOn": "RELEVANCE", "page": 0, "size": PAGE_SIZE}
     async with sem:
-        first = await request_json(client, "GET", SEARCH_URL, params=params0, headers=headers)
+        first = await request_json(
+            client,
+            "GET",
+            SEARCH_URL,
+            params=params0,
+            headers=headers,
+            retries=5,
+            retry_statuses=SEARCH_RETRY_STATUSES,
+            skip_statuses=SEARCH_SKIP_STATUSES,
+            context=f"taxonomy {taxonomy_id} page 0",
+        )
     if not first:
         return []
     products = list(first.get("products") or [])
@@ -138,7 +161,17 @@ async def search_taxonomy(client: httpx.AsyncClient, sem: asyncio.Semaphore, tok
     async def fetch_page(page: int) -> list[dict]:
         params = {**params0, "page": page}
         async with sem:
-            data = await request_json(client, "GET", SEARCH_URL, params=params, headers=headers)
+            data = await request_json(
+                client,
+                "GET",
+                SEARCH_URL,
+                params=params,
+                headers=headers,
+                retries=5,
+                retry_statuses=SEARCH_RETRY_STATUSES,
+                skip_statuses=SEARCH_SKIP_STATUSES,
+                context=f"taxonomy {taxonomy_id} page {page}",
+            )
         return list((data or {}).get("products") or [])
 
     if total_pages > 1:
