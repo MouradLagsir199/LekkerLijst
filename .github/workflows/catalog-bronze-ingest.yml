@@ -135,6 +135,10 @@ jobs:
             args+=(--sleep "$PLUS_SLEEP")
           fi
 
+          if [ "$STORE" = "jumbo" ]; then
+            args+=(--concurrency 1)
+          fi
+
           python -m "scrapers.${STORE}" "${args[@]}"
 
       - name: Summarize artifact

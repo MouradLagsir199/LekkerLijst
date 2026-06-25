@@ -50,7 +50,7 @@ USER_AGENT = (
 
 PAGE_SIZE = 24  # Jumbo's listing page size is server-fixed.
 DETAIL_CHUNK = 50  # ProductsBatch SKUs per request.
-CONCURRENCY = 4
+DEFAULT_CONCURRENCY = 4
 TIMEOUT = 60
 IMPERSONATE = "chrome124"
 
@@ -112,11 +112,10 @@ class NoClientHeaders(Exception):
 
 async def discover_client_version(client: curl_requests.AsyncSession) -> str:
     """GET the products page and pull the embedded applicationVersion."""
-    resp = await client.get(
-        PRODUCTEN_URL,
-        headers={"User-Agent": USER_AGENT, "Accept-Language": "nl-NL,nl;q=0.9,en;q=0.8"},
-        timeout=TIMEOUT,
-    )
+    resp = await client.get(PRODUCTEN_URL, timeout=TIMEOUT)
+    if resp.status_code >= 400:
+        print(f"Could not discover client-version (HTTP {resp.status_code}); using fallback {FALLBACK_CLIENT_VERSION}")
+        return FALLBACK_CLIENT_VERSION
     html = resp.text or ""
     match = re.search(r'applicationVersion:"([^"]+)"', html)
     if not match:
@@ -189,6 +188,7 @@ async def run_search(
     version_holder: list[str],
     *,
     limit: int | None,
+    concurrency: int,
 ) -> list[dict]:
     """Paginate the root category listing, returning all product cards."""
 
@@ -226,10 +226,10 @@ async def run_search(
         page = await fetch_offset(off)
         return list((page or {}).get("products") or [])
 
-    for start in range(0, len(offsets), CONCURRENCY * 4):
+    for start in range(0, len(offsets), concurrency * 4):
         if limit and len(cards) >= limit:
             break
-        batch = offsets[start : start + CONCURRENCY * 4]
+        batch = offsets[start : start + concurrency * 4]
         results = await asyncio.gather(*(fetch_page(o) for o in batch))
         for page_products in results:
             cards.extend(page_products)
@@ -279,16 +279,17 @@ def envelope(card: dict, detail: dict | None) -> dict:
     }
 
 
-async def run(*, limit: int | None, no_detail: bool) -> None:
+async def run(*, limit: int | None, no_detail: bool, concurrency: int) -> None:
     out_path = default_output_path(STORE)
-    sem = asyncio.Semaphore(CONCURRENCY)
+    sem = asyncio.Semaphore(concurrency)
 
     async with curl_requests.AsyncSession(
-        headers={"User-Agent": USER_AGENT}, impersonate=IMPERSONATE
+        headers=graphql_headers(FALLBACK_CLIENT_VERSION), impersonate=IMPERSONATE
     ) as client:
         version_holder = [await discover_client_version(client)]
+        client.headers.update(graphql_headers(version_holder[0]))
 
-        cards = await run_search(client, sem, version_holder, limit=limit)
+        cards = await run_search(client, sem, version_holder, limit=limit, concurrency=concurrency)
 
         # De-dup by listing id, preserving order.
         cards_by_id: dict[str, dict] = {}
@@ -315,8 +316,14 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Scrape the Jumbo catalog into a bronze JSONL artifact.")
     parser.add_argument("--limit", type=int, default=None, help="Cap total products (smoke test)")
     parser.add_argument("--no-detail", action="store_true", help="Skip the ProductsBatch detail hydrate")
+    parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=DEFAULT_CONCURRENCY,
+        help="Simultaneous GraphQL requests; use 1 on hosted CI runners",
+    )
     args = parser.parse_args()
-    asyncio.run(run(limit=args.limit, no_detail=args.no_detail))
+    asyncio.run(run(limit=args.limit, no_detail=args.no_detail, concurrency=max(args.concurrency, 1)))
 
 
 if __name__ == "__main__":
