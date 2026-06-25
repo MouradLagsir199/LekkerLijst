@@ -33,6 +33,11 @@ on:
         required: false
         default: "0.6"
         type: string
+      plus_detail:
+        description: "Run the very slow PLUS PDP detail hydration."
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -82,6 +87,7 @@ jobs:
       LIMIT: ${{ inputs.limit || '' }}
       NO_DETAIL: ${{ inputs.no_detail || 'false' }}
       PLUS_SLEEP: ${{ inputs.plus_sleep || '0.6' }}
+      PLUS_DETAIL: ${{ inputs.plus_detail || 'false' }}
       SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
 
     steps:
@@ -131,6 +137,9 @@ jobs:
             if [[ ! "$PLUS_SLEEP" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
               echo "::error::plus_sleep must be numeric"
               exit 1
+            fi
+            if [ "$PLUS_DETAIL" != "true" ]; then
+              args+=(--no-detail)
             fi
             args+=(--sleep "$PLUS_SLEEP")
           fi
