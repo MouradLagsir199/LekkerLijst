@@ -259,6 +259,57 @@ jobs:
           print(message)
           PY
 
+      - name: Refresh silver products
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+
+          import psycopg
+
+          from scrapers.bronze_ingest import connection_string
+
+          store = os.environ["STORE"]
+          with psycopg.connect(connection_string(), prepare_threshold=None) as conn:
+              with conn.cursor() as cur:
+                  cur.execute("SELECT store_id, rows_refreshed FROM catalog.refresh_silver_products(%s)", (store,))
+                  refreshed = cur.fetchall()
+                  cur.execute(
+                      """
+                      SELECT
+                        count(*)::int AS rows,
+                        count(*) FILTER (WHERE name IS NULL)::int AS missing_name,
+                        count(*) FILTER (WHERE ean IS NULL)::int AS missing_ean,
+                        count(*) FILTER (WHERE price IS NULL)::int AS missing_price,
+                        count(*) FILTER (WHERE image_url IS NULL)::int AS missing_image
+                      FROM catalog.silver_products
+                      WHERE store = %s
+                      """,
+                      (store,),
+                  )
+                  rows, missing_name, missing_ean, missing_price, missing_image = cur.fetchone()
+
+          if not refreshed:
+              raise SystemExit(f"Silver refresh returned no rows for {store}")
+          if rows <= 0:
+              raise SystemExit(f"No silver rows found for {store}")
+
+          refreshed_text = ", ".join(f"{store_id}: {count}" for store_id, count in refreshed)
+          message = (
+              f"## {store.upper()} silver refresh\n\n"
+              f"- Refreshed: `{refreshed_text}`\n"
+              f"- Store silver rows: `{rows}`\n"
+              f"- Missing name: `{missing_name}`\n"
+              f"- Missing EAN: `{missing_ean}`\n"
+              f"- Missing price: `{missing_price}`\n"
+              f"- Missing image URL: `{missing_image}`\n"
+          )
+          with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as summary:
+              summary.write("\n" + message)
+          print(message)
+          PY
+
       - name: Upload bronze JSONL artifact
         if: always()
         uses: actions/upload-artifact@v4
