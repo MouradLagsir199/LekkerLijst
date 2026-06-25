@@ -1,0 +1,256 @@
+name: Catalog Bronze Ingest
+
+on:
+  schedule:
+    # Daily at 02:17 UTC. In the Netherlands that is 03:17/04:17 depending on DST.
+    - cron: "17 2 * * *"
+  workflow_dispatch:
+    inputs:
+      store:
+        description: "Store to scrape and ingest"
+        required: true
+        default: "all"
+        type: choice
+        options:
+          - all
+          - ah
+          - jumbo
+          - dirk
+          - plus
+          - spar
+          - aldi
+      limit:
+        description: "Optional smoke-test product limit. Leave empty for a full catalog."
+        required: false
+        type: string
+      no_detail:
+        description: "Skip detail hydration where supported."
+        required: false
+        default: false
+        type: boolean
+      plus_sleep:
+        description: "Delay between PLUS requests."
+        required: false
+        default: "0.6"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: catalog-bronze-ingest-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    name: Plan Stores
+    runs-on: ubuntu-latest
+    outputs:
+      stores: ${{ steps.stores.outputs.stores }}
+    steps:
+      - name: Select stores
+        id: stores
+        env:
+          SELECTED_STORE: ${{ inputs.store || 'all' }}
+        run: |
+          case "$SELECTED_STORE" in
+            all|"")
+              echo 'stores=["ah","jumbo","dirk","plus","spar","aldi"]' >> "$GITHUB_OUTPUT"
+              ;;
+            ah|jumbo|dirk|plus|spar|aldi)
+              echo "stores=[\"$SELECTED_STORE\"]" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "::error::Unsupported store: $SELECTED_STORE"
+              exit 1
+              ;;
+          esac
+
+  scrape-and-ingest:
+    name: Scrape + Ingest (${{ matrix.store }})
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        store: ${{ fromJson(needs.plan.outputs.stores) }}
+
+    env:
+      STORE: ${{ matrix.store }}
+      LIMIT: ${{ inputs.limit || '' }}
+      NO_DETAIL: ${{ inputs.no_detail || 'false' }}
+      PLUS_SLEEP: ${{ inputs.plus_sleep || '0.6' }}
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: "scrapers/requirements.txt"
+
+      - name: Install scraper dependencies
+        run: python -m pip install -r scrapers/requirements.txt
+
+      - name: Check required database secret
+        run: |
+          if [ -z "$SUPABASE_DB_URL" ]; then
+            echo "::error::Missing GitHub secret SUPABASE_DB_URL. Use the Supabase session pooler Postgres URL with sslmode=require."
+            exit 1
+          fi
+
+      - name: Run scraper
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p Output
+
+          args=()
+          if [ -n "$LIMIT" ]; then
+            if [[ ! "$LIMIT" =~ ^[0-9]+$ ]]; then
+              echo "::error::limit must be a positive integer"
+              exit 1
+            fi
+            args+=(--limit "$LIMIT")
+          fi
+
+          if [ "$NO_DETAIL" = "true" ]; then
+            case "$STORE" in
+              ah|jumbo|plus|aldi) args+=(--no-detail) ;;
+              *) echo "Store $STORE does not support --no-detail; ignoring." ;;
+            esac
+          fi
+
+          if [ "$STORE" = "plus" ]; then
+            if [[ ! "$PLUS_SLEEP" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+              echo "::error::plus_sleep must be numeric"
+              exit 1
+            fi
+            args+=(--sleep "$PLUS_SLEEP")
+          fi
+
+          python -m "scrapers.${STORE}" "${args[@]}"
+
+      - name: Summarize artifact
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+
+          store = os.environ["STORE"]
+          path = Path("Output") / f"{store}_bronze.jsonl"
+          rows = sum(1 for line in path.open(encoding="utf-8") if line.strip())
+          size = path.stat().st_size
+          summary = Path(os.environ["GITHUB_STEP_SUMMARY"])
+          summary.write_text(
+              f"## {store.upper()} bronze artifact\n\n"
+              f"- Path: `{path}`\n"
+              f"- Rows: `{rows}`\n"
+              f"- Size: `{size}` bytes\n",
+              encoding="utf-8",
+          )
+          print(f"{store}: {rows} JSONL rows, {size} bytes")
+          PY
+
+      - name: Dry-run bronze ingest
+        run: python -m scrapers.bronze_ingest --store "$STORE" --input "Output/${STORE}_bronze.jsonl" --dry-run
+
+      - name: Ingest bronze rows
+        run: python -m scrapers.bronze_ingest --store "$STORE" --input "Output/${STORE}_bronze.jsonl"
+
+      - name: Validate bronze rows
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+
+          import psycopg
+
+          from scrapers.bronze_ingest import connection_string
+
+          store = os.environ["STORE"]
+          with psycopg.connect(connection_string()) as conn:
+              with conn.cursor() as cur:
+                  cur.execute(
+                      """
+                      SELECT id::text, status, row_count, completed_at
+                        FROM catalog.scrape_runs
+                       WHERE store = %s
+                       ORDER BY started_at DESC
+                       LIMIT 1
+                      """,
+                      (store,),
+                  )
+                  run = cur.fetchone()
+                  if not run:
+                      raise SystemExit(f"No scrape_runs row found for {store}")
+                  run_id, status, row_count, completed_at = run
+                  if status != "completed":
+                      raise SystemExit(f"Latest {store} scrape_run is {status}, expected completed")
+                  if not row_count or row_count <= 0:
+                      raise SystemExit(f"Latest {store} scrape_run has invalid row_count: {row_count}")
+
+                  cur.execute(
+                      """
+                      SELECT
+                        count(*)::int AS total_rows,
+                        count(*) FILTER (
+                          WHERE scrape_run_id IS NOT NULL
+                            AND store IS NOT NULL
+                            AND raw_data IS NOT NULL
+                            AND row_hash IS NOT NULL
+                            AND scraped_at IS NOT NULL
+                        )::int AS required_fields_present,
+                        count(*) FILTER (
+                          WHERE raw_data ? 'store'
+                            AND raw_data ? 'external_id'
+                            AND raw_data ? 'raw'
+                            AND raw_data ? 'scraped_at'
+                        )::int AS envelope_fields_present
+                      FROM catalog.bronze_products
+                      WHERE store = %s
+                      """,
+                      (store,),
+                  )
+                  total_rows, required_fields, envelope_fields = cur.fetchone()
+
+          if total_rows <= 0:
+              raise SystemExit(f"No bronze rows found for {store}")
+          if required_fields != total_rows:
+              raise SystemExit(
+                  f"{store}: required bronze fields present for {required_fields}/{total_rows} rows"
+              )
+          if envelope_fields != total_rows:
+              raise SystemExit(
+                  f"{store}: raw envelope fields present for {envelope_fields}/{total_rows} rows"
+              )
+
+          message = (
+              f"## {store.upper()} bronze validation\n\n"
+              f"- Latest run: `{run_id}`\n"
+              f"- Latest run status: `{status}`\n"
+              f"- Latest run scraped row count: `{row_count}`\n"
+              f"- Store bronze rows: `{total_rows}`\n"
+              f"- Required bronze fields: `{required_fields}/{total_rows}`\n"
+              f"- Raw envelope fields: `{envelope_fields}/{total_rows}`\n"
+          )
+          Path(os.environ["GITHUB_STEP_SUMMARY"]).write_text(message, encoding="utf-8")
+          print(message)
+          PY
+
+      - name: Upload bronze JSONL artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bronze-${{ matrix.store }}-${{ github.run_id }}
+          path: Output/${{ matrix.store }}_bronze.jsonl
+          if-no-files-found: warn
+          retention-days: 14
