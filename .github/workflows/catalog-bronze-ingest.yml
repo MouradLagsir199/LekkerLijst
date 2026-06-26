@@ -318,3 +318,85 @@ jobs:
           path: Output/${{ matrix.store }}_bronze.jsonl
           if-no-files-found: warn
           retention-days: 14
+
+  promote-and-group:
+    name: Promote + Group Products
+    needs: scrape-and-ingest
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: "scrapers/requirements.txt"
+
+      - name: Install database dependency
+        run: python -m pip install -r scrapers/requirements.txt
+
+      - name: Check required database secret
+        run: |
+          if [ -z "$SUPABASE_DB_URL" ]; then
+            echo "::error::Missing GitHub secret SUPABASE_DB_URL. Use the Supabase session pooler Postgres URL with sslmode=require."
+            exit 1
+          fi
+
+      - name: Promote public products and refresh deterministic groups
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+
+          import psycopg
+
+          from scrapers.bronze_ingest import connection_string
+
+          with psycopg.connect(connection_string(), prepare_threshold=None) as conn:
+              with conn.cursor() as cur:
+                  cur.execute("SELECT store_id, rows_upserted FROM catalog.promote_to_public(NULL)")
+                  promoted = cur.fetchall()
+
+                  cur.execute("SELECT step, rows_affected FROM catalog.refresh_exact_ean_groups()")
+                  exact = cur.fetchall()
+
+                  cur.execute("SELECT candidate_kind, candidates_created FROM catalog.generate_rule_group_review_candidates(2000)")
+                  candidates = cur.fetchall()
+
+                  cur.execute(
+                      """
+                      SELECT
+                        (SELECT count(*)::int FROM public.products) AS public_products,
+                        (SELECT count(*)::int FROM public.products WHERE exact_product_group_id IS NOT NULL) AS exact_grouped,
+                        (SELECT count(*)::int FROM public.products WHERE ingredient_id IS NOT NULL) AS substitute_grouped,
+                        (SELECT count(*)::int FROM catalog.group_review_candidates WHERE status = 'pending') AS pending_review
+                      """
+                  )
+                  totals = cur.fetchone()
+              conn.commit()
+
+          promoted_text = ", ".join(f"{store}: {count}" for store, count in promoted) or "none"
+          exact_text = ", ".join(f"{step}: {count}" for step, count in exact) or "none"
+          candidate_text = ", ".join(f"{kind}: {count}" for kind, count in candidates) or "none"
+          public_products, exact_grouped, substitute_grouped, pending_review = totals
+
+          message = (
+              "## Catalog promotion + grouping\n\n"
+              f"- Promoted: `{promoted_text}`\n"
+              f"- Exact/EAN refresh: `{exact_text}`\n"
+              f"- Review candidates generated: `{candidate_text}`\n"
+              f"- Public products: `{public_products}`\n"
+              f"- Exact grouped products: `{exact_grouped}`\n"
+              f"- Substitute grouped products: `{substitute_grouped}`\n"
+              f"- Pending review candidates: `{pending_review}`\n"
+          )
+          Path("catalog-promotion-summary.md").write_text(message, encoding="utf-8")
+          Path(os.environ["GITHUB_STEP_SUMMARY"]).write_text(message, encoding="utf-8")
+          print(message)
+          PY
