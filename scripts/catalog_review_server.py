@@ -130,6 +130,29 @@ class ReviewStore:
             conn.commit()
             return [(row[0], row[1]) for row in rows]
 
+    def approve_visible(self, *, candidate_ids: list[str]) -> dict[str, int]:
+        clean_ids: list[str] = []
+        for candidate_id in candidate_ids[:100]:
+            if not UUID_RE.match(candidate_id):
+                raise ValueError("Bad candidate id")
+            clean_ids.append(candidate_id)
+        if not clean_ids:
+            return {"candidates": 0, "products": 0}
+
+        total_products = 0
+        approved = 0
+        with self.connect() as conn, conn.cursor() as cur:
+            for candidate_id in clean_ids:
+                cur.execute(
+                    "SELECT status, rows_affected FROM catalog.apply_group_review_candidate(%s, 'approve')",
+                    (candidate_id,),
+                )
+                rows = cur.fetchall()
+                approved += 1
+                total_products += sum(int(row[1] or 0) for row in rows)
+            conn.commit()
+        return {"candidates": approved, "products": total_products}
+
     def approve_ai_batch(self, *, kind: str, limit: int) -> dict[str, int]:
         limit = min(max(limit, 1), 100)
         where = ["c.status = 'pending'", "c.ai_decision->>'decision' = 'approve'"]
@@ -182,6 +205,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
+        if parsed.path == "/batch/approve-visible":
+            self.handle_batch_approve_visible()
+            return
         if parsed.path == "/batch/approve-ai":
             self.handle_batch_approve_ai()
             return
@@ -199,6 +225,33 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+        except Exception as error:  # noqa: BLE001 - operator-facing local tool
+            self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, str(error))
+
+    def handle_batch_approve_visible(self) -> None:
+        try:
+            length = int(self.headers.get("Content-Length") or "0")
+        except ValueError:
+            length = 0
+        body = self.rfile.read(length).decode("utf-8") if length else ""
+        form = parse_qs(body)
+        candidate_ids = form.get("candidate_id") or []
+        status = (form.get("status") or ["pending"])[0]
+        kind = (form.get("kind") or ["all"])[0]
+        try:
+            limit = min(max(int((form.get("limit") or ["100"])[0]), 1), 200)
+        except ValueError:
+            limit = 100
+        try:
+            result = self.store.approve_visible(candidate_ids=candidate_ids)
+            redirect = f"/?status={status}&kind={kind if kind in {'all', 'exact', 'substitute'} else 'all'}&limit={limit}"
+            body_bytes = json.dumps({"ok": True, "result": result}).encode("utf-8")
+            self.send_response(HTTPStatus.SEE_OTHER)
+            self.send_header("Location", redirect)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body_bytes)))
+            self.end_headers()
+            self.wfile.write(body_bytes)
         except Exception as error:  # noqa: BLE001 - operator-facing local tool
             self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, str(error))
 
@@ -242,6 +295,22 @@ class Handler(BaseHTTPRequestHandler):
 def render_page(candidates: list[dict[str, Any]], *, status: str, kind: str, limit: int) -> str:
     cards = "\n".join(render_candidate(candidate) for candidate in candidates)
     batch_limit = min(limit, 100)
+    visible_ids = candidates[:100]
+    visible_inputs = "\n".join(
+        f'        <input type="hidden" name="candidate_id" value="{h(candidate["id"])}" />'
+        for candidate in visible_ids
+    )
+    visible_button = ""
+    if status == "pending" and visible_ids:
+        visible_button = f"""
+      <form method="post" action="/batch/approve-visible">
+        <input type="hidden" name="status" value="{h(status)}" />
+        <input type="hidden" name="kind" value="{h(kind)}" />
+        <input type="hidden" name="limit" value="{h(limit)}" />
+{visible_inputs}
+        <button class="batch" type="submit">Approve visible {h(len(visible_ids))}</button>
+      </form>
+        """
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -263,6 +332,7 @@ def render_page(candidates: list[dict[str, Any]], *, status: str, kind: str, lim
     .actions {{ display: flex; gap: 8px; flex-wrap: wrap; }}
     .approve {{ background: #1f7a4d; color: white; border-color: #1f7a4d; }}
     .batch {{ background: #174a63; color: white; border-color: #174a63; }}
+    .ai-batch {{ background: #5c3b75; color: white; border-color: #5c3b75; }}
     .reject {{ background: #9d2f2f; color: white; border-color: #9d2f2f; }}
     .later {{ background: #f2e7c9; border-color: #c5ad68; }}
     .grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(270px, 1fr)); gap: 12px; margin-top: 14px; }}
@@ -284,10 +354,11 @@ def render_page(candidates: list[dict[str, Any]], *, status: str, kind: str, lim
       <button type="submit">Filter</button>
     </form>
     <div class="toolbar">
+      {visible_button}
       <form method="post" action="/batch/approve-ai">
         <input type="hidden" name="kind" value="{h(kind)}" />
         <input type="hidden" name="limit" value="{h(batch_limit)}" />
-        <button class="batch" type="submit">Approve next {h(batch_limit)} AI-approved</button>
+        <button class="ai-batch" type="submit">Approve next {h(batch_limit)} AI-approved</button>
       </form>
     </div>
   </header>
