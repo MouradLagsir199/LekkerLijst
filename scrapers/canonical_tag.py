@@ -327,12 +327,14 @@ def cmd_status_chunks(args):
             item["request_counts"] = b.get("request_counts")
             item["output_file_id"] = b.get("output_file_id")
             item["error_file_id"] = b.get("error_file_id")
+            item["errors"] = b.get("errors")
             counts = b.get("request_counts") or {}
             print(
                 f"{item['part']}: {batch_id} status={b['status']} "
                 f"completed={counts.get('completed')}/{counts.get('total')} "
                 f"failed={counts.get('failed')} output={b.get('output_file_id')}"
             )
+            print_batch_errors(b, prefix=f"{item['part']}: ")
     save_manifest(manifest)
 
 
@@ -354,6 +356,7 @@ def download_and_load_chunks(*, require_complete: bool) -> int:
             item["request_counts"] = b.get("request_counts")
             item["output_file_id"] = b.get("output_file_id")
             item["error_file_id"] = b.get("error_file_id")
+            item["errors"] = b.get("errors")
             if b["status"] != "completed":
                 if require_complete:
                     sys.exit(f"{item['part']}: batch {batch_id} is {b['status']}, not completed")
@@ -437,6 +440,29 @@ def cmd_status(args):
         r.raise_for_status()
         b = r.json()
         print(f"status: {b['status']}   counts: {b.get('request_counts')}   output_file_id: {b.get('output_file_id')}")
+        print_batch_errors(b)
+
+
+def print_batch_errors(batch: dict, prefix: str = "") -> None:
+    errors = batch.get("errors") or {}
+    data = errors.get("data") if isinstance(errors, dict) else None
+    if not data:
+        return
+    print(f"{prefix}validation errors:")
+    for err in data[:20]:
+        line = err.get("line")
+        param = err.get("param")
+        code = err.get("code")
+        message = err.get("message")
+        location = []
+        if line is not None:
+            location.append(f"line={line}")
+        if param:
+            location.append(f"param={param}")
+        where = f" ({', '.join(location)})" if location else ""
+        print(f"{prefix}  - {code or 'error'}{where}: {message}")
+    if len(data) > 20:
+        print(f"{prefix}  ... {len(data) - 20} more validation errors")
 
 
 def cmd_download(args):
