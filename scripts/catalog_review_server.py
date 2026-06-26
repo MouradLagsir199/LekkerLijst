@@ -130,6 +130,37 @@ class ReviewStore:
             conn.commit()
             return [(row[0], row[1]) for row in rows]
 
+    def approve_ai_batch(self, *, kind: str, limit: int) -> dict[str, int]:
+        limit = min(max(limit, 1), 100)
+        where = ["c.status = 'pending'", "c.ai_decision->>'decision' = 'approve'"]
+        params: list[Any] = []
+        if kind in {"exact", "substitute"}:
+            where.append("c.candidate_kind = %s")
+            params.append(kind)
+        params.append(limit)
+        sql = f"""
+          SELECT c.id::text
+          FROM catalog.group_review_candidates c
+          WHERE {' AND '.join(where)}
+          ORDER BY c.ai_confidence DESC NULLS LAST, c.confidence DESC, c.created_at ASC
+          LIMIT %s
+        """
+        total_products = 0
+        approved = 0
+        with self.connect() as conn, conn.cursor() as cur:
+            cur.execute(sql, params)
+            candidate_ids = [row[0] for row in cur.fetchall()]
+            for candidate_id in candidate_ids:
+                cur.execute(
+                    "SELECT status, rows_affected FROM catalog.apply_group_review_candidate(%s, 'approve')",
+                    (candidate_id,),
+                )
+                rows = cur.fetchall()
+                approved += 1
+                total_products += sum(int(row[1] or 0) for row in rows)
+            conn.commit()
+        return {"candidates": approved, "products": total_products}
+
 
 class Handler(BaseHTTPRequestHandler):
     store: ReviewStore
@@ -151,6 +182,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
+        if parsed.path == "/batch/approve-ai":
+            self.handle_batch_approve_ai()
+            return
         match = re.match(r"^/candidate/([0-9a-fA-F-]{36})/(approve|reject|needs_later)$", parsed.path)
         if not match:
             self.send_error(HTTPStatus.NOT_FOUND)
@@ -168,6 +202,31 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as error:  # noqa: BLE001 - operator-facing local tool
             self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, str(error))
 
+    def handle_batch_approve_ai(self) -> None:
+        try:
+            length = int(self.headers.get("Content-Length") or "0")
+        except ValueError:
+            length = 0
+        body = self.rfile.read(length).decode("utf-8") if length else ""
+        form = parse_qs(body)
+        kind = (form.get("kind") or ["all"])[0]
+        try:
+            limit = min(max(int((form.get("limit") or ["100"])[0]), 1), 100)
+        except ValueError:
+            limit = 100
+        try:
+            result = self.store.approve_ai_batch(kind=kind, limit=limit)
+            redirect = f"/?status=pending&kind={kind if kind in {'exact', 'substitute'} else 'all'}&limit={limit}"
+            body_bytes = json.dumps({"ok": True, "result": result}).encode("utf-8")
+            self.send_response(HTTPStatus.SEE_OTHER)
+            self.send_header("Location", redirect)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body_bytes)))
+            self.end_headers()
+            self.wfile.write(body_bytes)
+        except Exception as error:  # noqa: BLE001 - operator-facing local tool
+            self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, str(error))
+
     def log_message(self, fmt: str, *args: Any) -> None:
         sys.stderr.write("[catalog-review] " + fmt % args + "\n")
 
@@ -182,6 +241,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def render_page(candidates: list[dict[str, Any]], *, status: str, kind: str, limit: int) -> str:
     cards = "\n".join(render_candidate(candidate) for candidate in candidates)
+    batch_limit = min(limit, 100)
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -193,6 +253,7 @@ def render_page(candidates: list[dict[str, Any]], *, status: str, kind: str, lim
     header {{ position: sticky; top: 0; background: #ffffff; border-bottom: 1px solid #ddd8ce; padding: 16px 22px; z-index: 2; }}
     main {{ padding: 18px 22px 40px; }}
     form.filters {{ display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }}
+    .toolbar {{ display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-top: 10px; }}
     select, input, button {{ border: 1px solid #bbb4aa; border-radius: 6px; padding: 8px 10px; background: white; font: inherit; }}
     button {{ cursor: pointer; font-weight: 700; }}
     .candidate {{ background: white; border: 1px solid #ddd8ce; border-radius: 8px; margin: 16px 0; padding: 16px; }}
@@ -201,6 +262,7 @@ def render_page(candidates: list[dict[str, Any]], *, status: str, kind: str, lim
     .reason {{ color: #56615b; margin: 8px 0 0; max-width: 900px; }}
     .actions {{ display: flex; gap: 8px; flex-wrap: wrap; }}
     .approve {{ background: #1f7a4d; color: white; border-color: #1f7a4d; }}
+    .batch {{ background: #174a63; color: white; border-color: #174a63; }}
     .reject {{ background: #9d2f2f; color: white; border-color: #9d2f2f; }}
     .later {{ background: #f2e7c9; border-color: #c5ad68; }}
     .grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(270px, 1fr)); gap: 12px; margin-top: 14px; }}
@@ -221,6 +283,13 @@ def render_page(candidates: list[dict[str, Any]], *, status: str, kind: str, lim
       <label>Limit <input name="limit" type="number" min="1" max="200" value="{h(limit)}" /></label>
       <button type="submit">Filter</button>
     </form>
+    <div class="toolbar">
+      <form method="post" action="/batch/approve-ai">
+        <input type="hidden" name="kind" value="{h(kind)}" />
+        <input type="hidden" name="limit" value="{h(batch_limit)}" />
+        <button class="batch" type="submit">Approve next {h(batch_limit)} AI-approved</button>
+      </form>
+    </div>
   </header>
   <main>
     <p>{len(candidates)} candidate(s)</p>
