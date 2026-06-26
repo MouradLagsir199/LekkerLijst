@@ -93,6 +93,20 @@ SYSTEM_PROMPT = (
     "  'Heinz Sandwich spread komkommer' -> {\"canonical_key\":\"sandwich_spread\",\"display_name\":\"Sandwich spread\",\"category\":\"sauzen\",\"is_organic\":false,\"unit_type\":\"weight\"}\n"
 )
 
+GROUP_SYSTEM_PROMPT = (
+    "Je normaliseert Nederlandse supermarktproducten naar substitutie-canonieke "
+    "productsoorten. Geef producten dezelfde canonical_key als ze in een recept of "
+    "boodschappenlijst uitwisselbaar zijn, ook bij ander merk, winkel, spelling, "
+    "buiging of maat. Laat merk, winkel, maat, aantal, 'vers' en 'voordeel' weg. "
+    "Behoud verschillen die het product wezenlijk anders maken: vetgehalte, smaak, "
+    "bereiding/vorm, dier/soort, cafeine/suiker/zero, lactosevrij, glutenvrij, "
+    "vegan, vegetarisch, halal, alcoholvrij, baby en huisdier. Negeer bio/biologisch "
+    "in canonical_key en zet is_organic=true. canonical_key is lowercase snake_case "
+    "Nederlands. display_name is een nette Nederlandse soortnaam zonder merk/maat. "
+    "category moet exact uit de toegestane lijst komen. unit_type is piece, weight "
+    "of volume. Return voor elk input item precies een output item met hetzelfde id."
+)
+
 TAG_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
@@ -103,6 +117,39 @@ TAG_SCHEMA = {
         "category": {"type": "string", "enum": CATEGORIES},
         "is_organic": {"type": "boolean"},
         "unit_type": {"type": "string", "enum": ["piece", "weight", "volume"]},
+    },
+}
+
+TAG_BATCH_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["items"],
+    "properties": {
+        "items": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 100,
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": [
+                    "id",
+                    "canonical_key",
+                    "display_name",
+                    "category",
+                    "is_organic",
+                    "unit_type",
+                ],
+                "properties": {
+                    "id": {"type": "string", "minLength": 1, "maxLength": 20},
+                    "canonical_key": {"type": "string", "minLength": 1, "maxLength": 60},
+                    "display_name": {"type": "string", "minLength": 1, "maxLength": 60},
+                    "category": {"type": "string", "enum": CATEGORIES},
+                    "is_organic": {"type": "boolean"},
+                    "unit_type": {"type": "string", "enum": ["piece", "weight", "volume"]},
+                },
+            },
+        },
     },
 }
 
@@ -143,6 +190,28 @@ def request_body(sample_name: str) -> dict:
     }
 
 
+def request_group_body(samples: list[dict[str, str]]) -> dict:
+    return {
+        "model": model_name(),
+        "input": [
+            {"role": "system", "content": GROUP_SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": "Tag deze producten:\n"
+                + json.dumps(samples, ensure_ascii=False, separators=(",", ":")),
+            },
+        ],
+        "text": {
+            "format": {
+                "type": "json_schema",
+                "name": "product_tag_batch",
+                "strict": True,
+                "schema": TAG_BATCH_SCHEMA,
+            }
+        },
+    }
+
+
 def extract_output_text(resp: dict) -> str | None:
     """Pull the model's text out of a /v1/responses payload (handles both shapes)."""
     if isinstance(resp.get("output_text"), str) and resp["output_text"].strip():
@@ -176,6 +245,11 @@ def fetch_names_to_tag(conn, limit: int | None, only_untagged: bool, like: str |
     return conn.execute(sql, params).fetchall()
 
 
+def batched_rows(rows: list[dict], size: int):
+    for start in range(0, len(rows), size):
+        yield rows[start:start + size]
+
+
 # ── build / submit / status / download / load (Batch API) ─────────────────────
 
 def cmd_build(args):
@@ -183,25 +257,37 @@ def cmd_build(args):
     with psycopg.connect(dsn(), prepare_threshold=None, row_factory=dict_row) as conn:
         rows = fetch_names_to_tag(conn, args.limit, not args.all, args.like)
     if args.chunks:
-        write_chunked_requests(rows, args.chunk_requests, args.chunk_bytes)
+        write_chunked_requests(rows, args.chunk_requests, args.chunk_bytes, args.names_per_request)
         return
     id_map: dict[str, str] = {}
     with REQUESTS_PATH.open("w", encoding="utf-8") as fh:
-        for i, r in enumerate(rows):
-            cid = f"n{i}"
-            id_map[cid] = r["name_search"]
-            fh.write(json.dumps({
-                "custom_id": cid,
-                "method": "POST",
-                "url": "/v1/responses",
-                "body": request_body(r["sample_name"]),
-            }, ensure_ascii=False) + "\n")
+        if args.names_per_request <= 1:
+            for i, r in enumerate(rows):
+                cid = f"n{i}"
+                id_map[cid] = r["name_search"]
+                fh.write(json.dumps({
+                    "custom_id": cid,
+                    "method": "POST",
+                    "url": "/v1/responses",
+                    "body": request_body(r["sample_name"]),
+                }, ensure_ascii=False) + "\n")
+        else:
+            for group_index, group in enumerate(batched_rows(rows, args.names_per_request)):
+                cid = f"g{group_index}"
+                samples = [{"id": f"i{i}", "name": r["sample_name"]} for i, r in enumerate(group)]
+                id_map[cid] = {sample["id"]: r["name_search"] for sample, r in zip(samples, group)}
+                fh.write(json.dumps({
+                    "custom_id": cid,
+                    "method": "POST",
+                    "url": "/v1/responses",
+                    "body": request_group_body(samples),
+                }, ensure_ascii=False) + "\n")
     MAP_PATH.write_text(json.dumps(id_map, ensure_ascii=False), encoding="utf-8")
-    print(f"wrote {len(rows)} requests -> {REQUESTS_PATH}")
+    print(f"wrote {len(rows)} names in {sum(1 for _ in REQUESTS_PATH.open(encoding='utf-8'))} requests -> {REQUESTS_PATH}")
     print(f"id map -> {MAP_PATH}")
 
 
-def write_chunked_requests(rows, max_requests: int, max_bytes: int) -> None:
+def write_chunked_requests(rows, max_requests: int, max_bytes: int, names_per_request: int) -> None:
     CHUNKS_DIR.mkdir(parents=True, exist_ok=True)
     for old_path in CHUNKS_DIR.glob("canonical_*part*.jsonl"):
         old_path.unlink()
@@ -239,20 +325,31 @@ def write_chunked_requests(rows, max_requests: int, max_bytes: int) -> None:
         chunk_bytes = 0
         chunk_index += 1
 
-    for i, r in enumerate(rows):
-        cid = f"n{i}"
+    request_index = 0
+    for group in batched_rows(rows, max(names_per_request, 1)):
+        if names_per_request <= 1:
+            r = group[0]
+            cid = f"n{request_index}"
+            map_value = r["name_search"]
+            body = request_body(r["sample_name"])
+        else:
+            cid = f"g{request_index}"
+            samples = [{"id": f"i{i}", "name": r["sample_name"]} for i, r in enumerate(group)]
+            map_value = {sample["id"]: r["name_search"] for sample, r in zip(samples, group)}
+            body = request_group_body(samples)
         line = json.dumps({
             "custom_id": cid,
             "method": "POST",
             "url": "/v1/responses",
-            "body": request_body(r["sample_name"]),
+            "body": body,
         }, ensure_ascii=False) + "\n"
         line_bytes = len(line.encode("utf-8"))
         if chunk_lines and (len(chunk_lines) >= max_requests or chunk_bytes + line_bytes > max_bytes):
             flush()
         chunk_lines.append(line)
-        chunk_map[cid] = r["name_search"]
+        chunk_map[cid] = map_value
         chunk_bytes += line_bytes
+        request_index += 1
     flush()
     MANIFEST_PATH.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"manifest -> {MANIFEST_PATH}")
@@ -489,17 +586,31 @@ def parse_batch_output(path: Path, id_map: dict[str, str]):
             continue
         rec = json.loads(line)
         cid = rec.get("custom_id")
-        name_search = id_map.get(cid)
-        if not name_search:
+        map_value = id_map.get(cid)
+        if not map_value:
             continue
         body = (rec.get("response") or {}).get("body") or {}
         text = extract_output_text(body)
         if not text:
             continue
         try:
-            yield name_search, json.loads(text)
+            payload = json.loads(text)
         except json.JSONDecodeError:
             continue
+        if isinstance(map_value, str):
+            yield map_value, payload
+            continue
+        if not isinstance(map_value, dict):
+            continue
+        for item in payload.get("items", []) if isinstance(payload, dict) else []:
+            if not isinstance(item, dict):
+                continue
+            item_id = str(item.get("id") or "")
+            name_search = map_value.get(item_id)
+            if not name_search:
+                continue
+            tag = {k: v for k, v in item.items() if k != "id"}
+            yield name_search, tag
 
 
 def upsert_tags(conn, items, model: str, source: str = "ai_batch") -> int:
@@ -634,6 +745,7 @@ def main():
     b.add_argument("--limit", type=int, default=None)
     b.add_argument("--all", action="store_true", help="include already-tagged names (default: only rule/untagged)")
     b.add_argument("--like", type=str, default=None, help="only names whose name_search LIKE %%X%%")
+    b.add_argument("--names-per-request", type=int, default=1, help="pack multiple names into each OpenAI request")
     b.add_argument("--chunks", action="store_true", help="split into OpenAI Batch-size-safe chunk files")
     b.add_argument("--chunk-requests", type=int, default=45000, help="maximum requests per chunk")
     b.add_argument("--chunk-bytes", type=int, default=180_000_000, help="maximum bytes per chunk")

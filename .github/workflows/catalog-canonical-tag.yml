@@ -98,7 +98,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          args=(build --chunks --chunk-requests 45000 --chunk-bytes 180000000)
+          args=(build --chunks --names-per-request 100 --chunk-requests 45000 --chunk-bytes 180000000)
           if [ -n "$LIMIT" ]; then
             args+=(--limit "$LIMIT")
           fi
