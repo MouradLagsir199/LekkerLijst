@@ -1,0 +1,138 @@
+name: Catalog Canonical Tagging
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "Batch action"
+        required: true
+        default: "build_submit"
+        type: choice
+        options:
+          - build_submit
+          - status
+          - wait_load
+      source_run_id:
+        description: "Run ID containing canonical-batch-manifest artifact, for status/wait_load"
+        required: false
+        type: string
+      limit:
+        description: "Optional name limit for a smaller test batch"
+        required: false
+        type: string
+      wait_after_submit:
+        description: "After submitting, wait for completion and load results in the same run"
+        required: false
+        default: false
+        type: boolean
+      interval:
+        description: "Polling interval in seconds"
+        required: false
+        default: "60"
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: catalog-canonical-tagging
+  cancel-in-progress: false
+
+jobs:
+  canonical-tag:
+    name: Canonical Tagging
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      ACTION: ${{ inputs.action }}
+      SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+      LIMIT: ${{ inputs.limit }}
+      WAIT_AFTER_SUBMIT: ${{ inputs.wait_after_submit || 'false' }}
+      INTERVAL: ${{ inputs.interval || '60' }}
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      OPENAI_CATALOG_MODEL: ${{ secrets.OPENAI_CATALOG_MODEL }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: "scrapers/requirements.txt"
+
+      - name: Install dependencies
+        run: python -m pip install -r scrapers/requirements.txt
+
+      - name: Check required secrets and inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "$SUPABASE_DB_URL" ]; then
+            echo "::error::Missing SUPABASE_DB_URL secret"
+            exit 1
+          fi
+          if [ -z "$OPENAI_API_KEY" ]; then
+            echo "::error::Missing OPENAI_API_KEY secret"
+            exit 1
+          fi
+          if [[ ! "$INTERVAL" =~ ^[0-9]+$ ]]; then
+            echo "::error::interval must be a positive integer"
+            exit 1
+          fi
+          if [ -n "$LIMIT" ] && [[ ! "$LIMIT" =~ ^[0-9]+$ ]]; then
+            echo "::error::limit must be a positive integer"
+            exit 1
+          fi
+          if [ "$ACTION" != "build_submit" ] && [ -z "$SOURCE_RUN_ID" ]; then
+            echo "::error::source_run_id is required for status/wait_load"
+            exit 1
+          fi
+
+      - name: Build and submit chunked batches
+        if: ${{ inputs.action == 'build_submit' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=(build --chunks --chunk-requests 45000 --chunk-bytes 180000000)
+          if [ -n "$LIMIT" ]; then
+            args+=(--limit "$LIMIT")
+          fi
+          python -m scrapers.canonical_tag "${args[@]}"
+          python -m scrapers.canonical_tag submit-chunks
+          python -m scrapers.canonical_tag status-chunks
+
+      - name: Download previous manifest
+        if: ${{ inputs.action != 'build_submit' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p Output/canonical_batches
+          gh run download "$SOURCE_RUN_ID" \
+            --name "canonical-batch-manifest-$SOURCE_RUN_ID" \
+            --dir Output/canonical_batches
+          ls -lah Output/canonical_batches
+
+      - name: Poll chunk status
+        if: ${{ inputs.action == 'status' }}
+        run: python -m scrapers.canonical_tag status-chunks
+
+      - name: Wait, download and load chunks
+        if: ${{ inputs.action == 'wait_load' || (inputs.action == 'build_submit' && inputs.wait_after_submit == true) }}
+        shell: bash
+        run: python -m scrapers.canonical_tag wait-chunks --interval "$INTERVAL"
+
+      - name: Upload canonical batch manifest
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: canonical-batch-manifest-${{ github.run_id }}
+          path: |
+            Output/canonical_batches/manifest.json
+            Output/canonical_batches/*.map.json
+          if-no-files-found: ignore
+          retention-days: 14
