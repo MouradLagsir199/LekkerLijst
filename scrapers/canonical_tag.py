@@ -107,6 +107,19 @@ GROUP_SYSTEM_PROMPT = (
     "of volume. Return voor elk input item precies een output item met hetzelfde id."
 )
 
+RECANON_SYSTEM_PROMPT = (
+    "Je normaliseert bestaande canonical_keys van Nederlandse supermarktproducten "
+    "naar een iets grovere substitutie-sleutel. Je krijgt per item de huidige key, "
+    "display_name, categorie, store_count en voorbeeldnamen. Geef een coarse_key "
+    "die producten samenbrengt als ze in een recept/boodschappenlijst uitwisselbaar "
+    "zijn. Laat maat, verpakking, winkel, merk, marketingwoorden en vetpercentages "
+    "zoals 48_plus weg als die alleen fragmenteren. Behoud prijsrelevante verschillen: "
+    "halfvolle/volle/magere melk, cola_zero vs cola, smaak, bereidingsvorm, dier/soort, "
+    "lactosevrij, glutenvrij, vegan, vegetarisch, halal, alcoholvrij, baby en huisdier. "
+    "Als de huidige key al goed is, return dezelfde key. coarse_key is lowercase "
+    "snake_case Nederlands. Return precies een output item per input id."
+)
+
 TAG_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
@@ -147,6 +160,31 @@ TAG_BATCH_SCHEMA = {
                     "category": {"type": "string", "enum": CATEGORIES},
                     "is_organic": {"type": "boolean"},
                     "unit_type": {"type": "string", "enum": ["piece", "weight", "volume"]},
+                },
+            },
+        },
+    },
+}
+
+RECANON_BATCH_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["items"],
+    "properties": {
+        "items": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 100,
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["id", "coarse_key", "display_name", "confidence", "reason"],
+                "properties": {
+                    "id": {"type": "string", "minLength": 1, "maxLength": 20},
+                    "coarse_key": {"type": "string", "minLength": 1, "maxLength": 60},
+                    "display_name": {"type": "string", "minLength": 1, "maxLength": 60},
+                    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                    "reason": {"type": "string", "minLength": 1, "maxLength": 200},
                 },
             },
         },
@@ -212,6 +250,28 @@ def request_group_body(samples: list[dict[str, str]]) -> dict:
     }
 
 
+def recanon_request_body(items: list[dict]) -> dict:
+    return {
+        "model": model_name(),
+        "input": [
+            {"role": "system", "content": RECANON_SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": "Her-canonicaliseer deze keys:\n"
+                + json.dumps(items, ensure_ascii=False, separators=(",", ":")),
+            },
+        ],
+        "text": {
+            "format": {
+                "type": "json_schema",
+                "name": "canonical_key_remap_batch",
+                "strict": True,
+                "schema": RECANON_BATCH_SCHEMA,
+            }
+        },
+    }
+
+
 def extract_output_text(resp: dict) -> str | None:
     """Pull the model's text out of a /v1/responses payload (handles both shapes)."""
     if isinstance(resp.get("output_text"), str) and resp["output_text"].strip():
@@ -239,6 +299,38 @@ def fetch_names_to_tag(conn, limit: int | None, only_untagged: bool, like: str |
         WHERE {' AND '.join(where)}
         GROUP BY p.name_search
         ORDER BY count(*) DESC, p.name_search
+    """
+    if limit:
+        sql += f" LIMIT {int(limit)}"
+    return conn.execute(sql, params).fetchall()
+
+
+def fetch_recanon_keys(conn, limit: int | None, min_words: int, like: str | None):
+    """Find over-specific canonical keys worth asking the model to coarsen."""
+    params: list = [min_words]
+    where = [
+        "nc.canonical_key IS NOT NULL",
+        "nc.canonical_key <> ''",
+        "(array_length(string_to_array(nc.canonical_key, '_'), 1) >= %s OR nc.canonical_key ~ '_[0-9]+_plus$')",
+    ]
+    if like:
+        where.append("nc.canonical_key LIKE %s")
+        params.append(f"%{like}%")
+    sql = f"""
+        SELECT
+          nc.canonical_key,
+          min(nc.display_name) AS display_name,
+          min(nc.category) AS category,
+          count(DISTINCT nc.name_search)::int AS name_count,
+          count(DISTINCT p.store_id)::int AS store_count,
+          (array_agg(DISTINCT p.name ORDER BY p.name))[1:8] AS sample_names
+        FROM catalog.name_canonical nc
+        JOIN public.products p ON p.name_search = nc.name_search
+        WHERE {' AND '.join(where)}
+        GROUP BY nc.canonical_key
+        HAVING count(DISTINCT p.store_id) = 1
+            OR nc.canonical_key ~ '_[0-9]+_plus$'
+        ORDER BY count(DISTINCT p.store_id), count(DISTINCT nc.name_search) DESC, nc.canonical_key
     """
     if limit:
         sql += f" LIMIT {int(limit)}"
@@ -350,6 +442,89 @@ def write_chunked_requests(rows, max_requests: int, max_bytes: int, names_per_re
         chunk_map[cid] = map_value
         chunk_bytes += line_bytes
         request_index += 1
+    flush()
+    MANIFEST_PATH.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+    print(f"manifest -> {MANIFEST_PATH}")
+
+
+def cmd_recanon_build(args):
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    with psycopg.connect(dsn(), prepare_threshold=None, row_factory=dict_row) as conn:
+        rows = fetch_recanon_keys(conn, args.limit, args.min_words, args.like)
+    write_recanon_chunked_requests(rows, args.keys_per_request, args.chunk_requests, args.chunk_bytes)
+
+
+def write_recanon_chunked_requests(rows, keys_per_request: int, max_requests: int, max_bytes: int) -> None:
+    CHUNKS_DIR.mkdir(parents=True, exist_ok=True)
+    for old_path in CHUNKS_DIR.glob("canonical_*part*.jsonl"):
+        old_path.unlink()
+    for old_path in CHUNKS_DIR.glob("canonical_requests.part*.map.json"):
+        old_path.unlink()
+    if MANIFEST_PATH.exists():
+        MANIFEST_PATH.unlink()
+
+    manifest: list[dict] = []
+    chunk_lines: list[str] = []
+    chunk_map: dict[str, dict[str, str]] = {}
+    chunk_bytes = 0
+    chunk_index = 1
+    request_index = 0
+
+    def flush() -> None:
+        nonlocal chunk_lines, chunk_map, chunk_bytes, chunk_index
+        if not chunk_lines:
+            return
+        stem = f"part{chunk_index:03d}"
+        request_path = CHUNKS_DIR / f"canonical_requests.{stem}.jsonl"
+        map_path = CHUNKS_DIR / f"canonical_requests.{stem}.map.json"
+        request_path.write_text("".join(chunk_lines), encoding="utf-8")
+        map_path.write_text(json.dumps(chunk_map, ensure_ascii=False), encoding="utf-8")
+        manifest.append({
+            "kind": "recanon",
+            "part": stem,
+            "request_file": request_path.name,
+            "map_file": map_path.name,
+            "output_file": f"canonical_output.{stem}.jsonl",
+            "requests": len(chunk_lines),
+            "bytes": request_path.stat().st_size,
+        })
+        print(f"wrote {len(chunk_lines)} recanon requests ({request_path.stat().st_size} bytes) -> {request_path}")
+        chunk_lines = []
+        chunk_map = {}
+        chunk_bytes = 0
+        chunk_index += 1
+
+    for group in batched_rows(rows, max(keys_per_request, 1)):
+        cid = f"r{request_index}"
+        items = []
+        id_map: dict[str, str] = {}
+        for i, row in enumerate(group):
+            item_id = f"i{i}"
+            key = row["canonical_key"]
+            id_map[item_id] = key
+            items.append({
+                "id": item_id,
+                "canonical_key": key,
+                "display_name": row.get("display_name"),
+                "category": row.get("category"),
+                "store_count": row.get("store_count"),
+                "name_count": row.get("name_count"),
+                "sample_names": row.get("sample_names") or [],
+            })
+        line = json.dumps({
+            "custom_id": cid,
+            "method": "POST",
+            "url": "/v1/responses",
+            "body": recanon_request_body(items),
+        }, ensure_ascii=False) + "\n"
+        line_bytes = len(line.encode("utf-8"))
+        if chunk_lines and (len(chunk_lines) >= max_requests or chunk_bytes + line_bytes > max_bytes):
+            flush()
+        chunk_lines.append(line)
+        chunk_map[cid] = id_map
+        chunk_bytes += line_bytes
+        request_index += 1
+
     flush()
     MANIFEST_PATH.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"manifest -> {MANIFEST_PATH}")
@@ -471,12 +646,16 @@ def download_and_load_chunks(*, require_complete: bool) -> int:
             map_path = CHUNKS_DIR / item["map_file"]
             id_map = json.loads(map_path.read_text(encoding="utf-8"))
             with psycopg.connect(dsn(), prepare_threshold=None, autocommit=True) as conn:
-                loaded = upsert_tags(conn, parse_batch_output(output_path, id_map), model_name())
+                if item.get("kind") == "recanon":
+                    loaded = apply_recanon_remaps(conn, parse_recanon_batch_output(output_path, id_map), model_name())
+                else:
+                    loaded = upsert_tags(conn, parse_batch_output(output_path, id_map), model_name())
             item["loaded"] = loaded
             item["loaded_at"] = now_iso()
             loaded_total += loaded
             save_manifest(manifest)
-            print(f"{item['part']}: loaded {loaded} semantic tags")
+            label = "canonical key remaps" if item.get("kind") == "recanon" else "semantic tags"
+            print(f"{item['part']}: loaded {loaded} {label}")
     save_manifest(manifest)
     return loaded_total
 
@@ -613,6 +792,51 @@ def parse_batch_output(path: Path, id_map: dict[str, str]):
             yield name_search, tag
 
 
+def clean_key(value: str | None) -> str:
+    if not value:
+        return ""
+    value = value.strip().lower().replace("-", "_").replace(" ", "_")
+    value = "".join(ch if ch.isalnum() or ch == "_" else "_" for ch in value)
+    while "__" in value:
+        value = value.replace("__", "_")
+    return value.strip("_")
+
+
+def parse_recanon_batch_output(path: Path, id_map: dict[str, dict[str, str]]):
+    """Yield (old_key, remap_dict) from a recanon Batch API output JSONL."""
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        rec = json.loads(line)
+        cid = rec.get("custom_id")
+        request_map = id_map.get(cid)
+        if not isinstance(request_map, dict):
+            continue
+        body = (rec.get("response") or {}).get("body") or {}
+        text = extract_output_text(body)
+        if not text:
+            continue
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            continue
+        for item in payload.get("items", []) if isinstance(payload, dict) else []:
+            if not isinstance(item, dict):
+                continue
+            item_id = str(item.get("id") or "")
+            old_key = request_map.get(item_id)
+            new_key = clean_key(item.get("coarse_key"))
+            if not old_key or not new_key:
+                continue
+            yield old_key, {
+                "coarse_key": new_key,
+                "display_name": item.get("display_name"),
+                "confidence": item.get("confidence"),
+                "reason": item.get("reason"),
+            }
+
+
 def upsert_tags(conn, items, model: str, source: str = "ai_batch") -> int:
     n = 0
     for name_search, tag in items:
@@ -640,6 +864,37 @@ def upsert_tags(conn, items, model: str, source: str = "ai_batch") -> int:
              tag.get("is_organic"), tag.get("unit_type"), 0.9, source, model),
         )
         n += 1
+    return n
+
+
+def apply_recanon_remaps(conn, items, model: str) -> int:
+    n = 0
+    for old_key, remap in items:
+        new_key = clean_key(remap.get("coarse_key"))
+        if not new_key:
+            continue
+        display_name = remap.get("display_name")
+        result = conn.execute(
+            """
+            UPDATE catalog.name_canonical
+               SET canonical_key = %s,
+                   display_name = COALESCE(%s, display_name),
+                   confidence = GREATEST(COALESCE(confidence, 0), %s),
+                   source = 'ai_batch',
+                   model = %s,
+                   tagged_at = now()
+             WHERE canonical_key = %s
+               AND canonical_key IS DISTINCT FROM %s
+            """,
+            (new_key, display_name, remap.get("confidence") or 0.8, model, old_key, new_key),
+        )
+        n += result.rowcount if result.rowcount and result.rowcount > 0 else 0
+
+    if n:
+        try:
+            conn.execute("SELECT catalog.apply_canonical_keys()")
+        except psycopg.errors.UndefinedFunction:
+            pass
     return n
 
 
@@ -750,6 +1005,15 @@ def main():
     b.add_argument("--chunk-requests", type=int, default=45000, help="maximum requests per chunk")
     b.add_argument("--chunk-bytes", type=int, default=180_000_000, help="maximum bytes per chunk")
     b.set_defaults(func=cmd_build)
+
+    rb = sub.add_parser("recanon-build", help="write Batch API requests to coarsen over-specific canonical keys")
+    rb.add_argument("--limit", type=int, default=None)
+    rb.add_argument("--like", type=str, default=None, help="only keys whose canonical_key LIKE %%X%%")
+    rb.add_argument("--min-words", type=int, default=4, help="candidate keys with at least this many underscore words")
+    rb.add_argument("--keys-per-request", type=int, default=80, help="pack multiple keys into each OpenAI request")
+    rb.add_argument("--chunk-requests", type=int, default=45000, help="maximum requests per chunk")
+    rb.add_argument("--chunk-bytes", type=int, default=180_000_000, help="maximum bytes per chunk")
+    rb.set_defaults(func=cmd_recanon_build)
 
     s = sub.add_parser("submit", help="upload + create the batch")
     s.set_defaults(func=cmd_submit)
