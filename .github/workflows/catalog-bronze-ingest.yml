@@ -268,34 +268,23 @@ jobs:
             python -m scrapers.bronze_ingest --store "$store" --input "$input" --dry-run
             python -m scrapers.bronze_ingest --store "$store" --input "$input"
 
-            STORE="$store" python - <<'PY'
-            import os
-            import psycopg
+            psql "$LOCAL_CATALOG_DB_URL" -v ON_ERROR_STOP=1 \
+              -c "SELECT store_id, rows_refreshed FROM catalog.refresh_silver_products('$store');"
 
-            store = os.environ["STORE"]
-            dsn = os.environ["LOCAL_CATALOG_DB_URL"]
-            with psycopg.connect(dsn, prepare_threshold=None) as conn:
-                refreshed = conn.execute(
-                    "SELECT store_id, rows_refreshed FROM catalog.refresh_silver_products(%s)",
-                    (store,),
-                ).fetchall()
-                rows = conn.execute(
-                    """
-                    SELECT count(*)::int,
+            IFS='|' read -r rows missing_name missing_price missing_image < <(
+              psql "$LOCAL_CATALOG_DB_URL" -v ON_ERROR_STOP=1 -At -F '|' \
+                -c "SELECT count(*)::int,
                            count(*) FILTER (WHERE name IS NULL)::int,
                            count(*) FILTER (WHERE price IS NULL)::int,
                            count(*) FILTER (WHERE image_url IS NULL)::int
                     FROM catalog.silver_products
-                    WHERE store = %s
-                    """,
-                    (store,),
-                ).fetchone()
-                conn.commit()
-
-            print(f"{store}: refreshed={refreshed} silver_rows={rows[0]} missing_name={rows[1]} missing_price={rows[2]} missing_image={rows[3]}")
-            if not refreshed or rows[0] <= 0 or rows[1] != 0:
-                raise SystemExit(f"{store}: local silver validation failed")
-            PY
+                    WHERE store = '$store';"
+            )
+            echo "$store: silver_rows=$rows missing_name=$missing_name missing_price=$missing_price missing_image=$missing_image"
+            if [ "$rows" -le 0 ] || [ "$missing_name" -ne 0 ]; then
+              echo "::error::$store local silver validation failed"
+              exit 1
+            fi
           done
 
       - name: Promote and group local products
