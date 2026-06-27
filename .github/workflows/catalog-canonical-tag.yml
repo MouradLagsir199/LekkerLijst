@@ -1,4 +1,4 @@
-name: Catalog Canonical Tagging
+name: Catalog Canonical Recanon
 
 on:
   workflow_dispatch:
@@ -17,11 +17,11 @@ on:
         required: false
         type: string
       limit:
-        description: "Optional name limit for a smaller test batch"
+        description: "Optional key limit for a smaller test batch"
         required: false
         type: string
       wait_after_submit:
-        description: "After submitting, wait for completion and load results in the same run"
+        description: "After submitting, wait for completion, load locally, and sync hosted"
         required: false
         default: false
         type: boolean
@@ -36,24 +36,38 @@ permissions:
   actions: read
 
 concurrency:
-  group: catalog-canonical-tagging
+  group: catalog-canonical-recanon
   cancel-in-progress: false
 
 jobs:
-  canonical-tag:
-    name: Canonical Tagging
+  canonical-recanon:
+    name: Canonical Recanon
     runs-on: ubuntu-latest
     timeout-minutes: 360
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: localdev
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
     env:
       ACTION: ${{ inputs.action }}
       SOURCE_RUN_ID: ${{ inputs.source_run_id }}
       LIMIT: ${{ inputs.limit }}
       WAIT_AFTER_SUBMIT: ${{ inputs.wait_after_submit || 'false' }}
       INTERVAL: ${{ inputs.interval || '60' }}
-      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      LOCAL_CATALOG_DB_URL: postgresql://postgres:localdev@localhost:5432/postgres
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       OPENAI_CATALOG_MODEL: ${{ secrets.OPENAI_CATALOG_MODEL }}
       GH_TOKEN: ${{ github.token }}
+
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -66,9 +80,16 @@ jobs:
           cache-dependency-path: "scrapers/requirements.txt"
 
       - name: Install dependencies
-        run: python -m pip install -r scrapers/requirements.txt
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client
+          python -m pip install -r scrapers/requirements.txt
 
       - name: Check required secrets and inputs
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
         shell: bash
         run: |
           set -euo pipefail
@@ -93,12 +114,24 @@ jobs:
             exit 1
           fi
 
-      - name: Build and submit chunked batches
-        if: ${{ inputs.action == 'build_submit' }}
+      - name: Bootstrap local catalog from hosted products
+        if: ${{ inputs.action != 'status' }}
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
         shell: bash
         run: |
           set -euo pipefail
-          args=(build --chunks --names-per-request 100 --chunk-requests 45000 --chunk-bytes 180000000)
+          psql "$LOCAL_CATALOG_DB_URL" -v ON_ERROR_STOP=1 -f scrapers/local_catalog_schema.sql
+          python -m scrapers.seed_local_catalog --products
+
+      - name: Build and submit recanon batch
+        if: ${{ inputs.action == 'build_submit' }}
+        env:
+          SUPABASE_DB_URL: ${{ env.LOCAL_CATALOG_DB_URL }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=(recanon-build)
           if [ -n "$LIMIT" ]; then
             args+=(--limit "$LIMIT")
           fi
@@ -119,12 +152,22 @@ jobs:
 
       - name: Poll chunk status
         if: ${{ inputs.action == 'status' }}
+        env:
+          SUPABASE_DB_URL: ${{ env.LOCAL_CATALOG_DB_URL }}
         run: python -m scrapers.canonical_tag status-chunks
 
-      - name: Wait, download and load chunks
+      - name: Wait, download, and load chunks locally
         if: ${{ inputs.action == 'wait_load' || (inputs.action == 'build_submit' && inputs.wait_after_submit == true) }}
+        env:
+          SUPABASE_DB_URL: ${{ env.LOCAL_CATALOG_DB_URL }}
         shell: bash
         run: python -m scrapers.canonical_tag wait-chunks --interval "$INTERVAL"
+
+      - name: Sync loaded canonical products to hosted
+        if: ${{ inputs.action == 'wait_load' || (inputs.action == 'build_submit' && inputs.wait_after_submit == true) }}
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: python -m scrapers.sync_products
 
       - name: Upload canonical batch manifest
         if: always()
@@ -134,5 +177,6 @@ jobs:
           path: |
             Output/canonical_batches/manifest.json
             Output/canonical_batches/*.map.json
+            Output/canonical_batches/*.jsonl
           if-no-files-found: ignore
           retention-days: 14

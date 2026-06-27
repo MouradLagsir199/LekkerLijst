@@ -1,4 +1,4 @@
-name: Catalog Bronze Ingest
+name: Catalog Local Rebuild
 
 on:
   schedule:
@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       store:
-        description: "Store to scrape and ingest"
+        description: "Store to scrape, or all"
         required: true
         default: "all"
         type: choice
@@ -20,7 +20,7 @@ on:
           - spar
           - aldi
       limit:
-        description: "Optional smoke-test product limit. Leave empty for a full catalog."
+        description: "Optional smoke-test product limit. Limited runs do not sync hosted."
         required: false
         type: string
       no_detail:
@@ -41,9 +41,10 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
-  group: catalog-bronze-ingest-${{ github.ref }}-${{ github.event_name == 'workflow_dispatch' && inputs.store || 'all' }}
+  group: catalog-local-rebuild-${{ github.ref }}-${{ github.event_name == 'workflow_dispatch' && inputs.store || 'all' }}
   cancel-in-progress: false
 
 jobs:
@@ -52,6 +53,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       stores: ${{ steps.stores.outputs.stores }}
+      selected_store: ${{ steps.stores.outputs.selected_store }}
     steps:
       - name: Select stores
         id: stores
@@ -61,9 +63,11 @@ jobs:
           case "$SELECTED_STORE" in
             all|"")
               echo 'stores=["ah","jumbo","dirk","plus","spar","aldi"]' >> "$GITHUB_OUTPUT"
+              echo "selected_store=all" >> "$GITHUB_OUTPUT"
               ;;
             ah|jumbo|dirk|plus|spar|aldi)
               echo "stores=[\"$SELECTED_STORE\"]" >> "$GITHUB_OUTPUT"
+              echo "selected_store=$SELECTED_STORE" >> "$GITHUB_OUTPUT"
               ;;
             *)
               echo "::error::Unsupported store: $SELECTED_STORE"
@@ -71,8 +75,8 @@ jobs:
               ;;
           esac
 
-  scrape-and-ingest:
-    name: Scrape + Ingest (${{ matrix.store }})
+  scrape:
+    name: Scrape (${{ matrix.store }})
     needs: plan
     runs-on: ubuntu-latest
     timeout-minutes: 180
@@ -88,7 +92,6 @@ jobs:
       NO_DETAIL: ${{ inputs.no_detail || 'false' }}
       PLUS_SLEEP: ${{ inputs.plus_sleep || '0.1' }}
       PLUS_DETAIL: ${{ inputs.plus_detail || 'false' }}
-      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
 
     steps:
       - name: Check out repository
@@ -103,13 +106,6 @@ jobs:
 
       - name: Install scraper dependencies
         run: python -m pip install -r scrapers/requirements.txt
-
-      - name: Check required database secret
-        run: |
-          if [ -z "$SUPABASE_DB_URL" ]; then
-            echo "::error::Missing GitHub secret SUPABASE_DB_URL. Use the Supabase session pooler Postgres URL with sslmode=require."
-            exit 1
-          fi
 
       - name: Run scraper
         shell: bash
@@ -153,6 +149,7 @@ jobs:
       - name: Summarize artifact
         shell: bash
         run: |
+          set -euo pipefail
           python - <<'PY'
           import os
           from pathlib import Path
@@ -161,171 +158,50 @@ jobs:
           path = Path("Output") / f"{store}_bronze.jsonl"
           rows = sum(1 for line in path.open(encoding="utf-8") if line.strip())
           size = path.stat().st_size
-          summary = Path(os.environ["GITHUB_STEP_SUMMARY"])
-          summary.write_text(
+          message = (
               f"## {store.upper()} bronze artifact\n\n"
               f"- Path: `{path}`\n"
               f"- Rows: `{rows}`\n"
-              f"- Size: `{size}` bytes\n",
-              encoding="utf-8",
-          )
-          print(f"{store}: {rows} JSONL rows, {size} bytes")
-          PY
-
-      - name: Dry-run bronze ingest
-        run: python -m scrapers.bronze_ingest --store "$STORE" --input "Output/${STORE}_bronze.jsonl" --dry-run
-
-      - name: Ingest bronze rows
-        run: python -m scrapers.bronze_ingest --store "$STORE" --input "Output/${STORE}_bronze.jsonl"
-
-      - name: Validate bronze rows
-        shell: bash
-        run: |
-          python - <<'PY'
-          import os
-          from pathlib import Path
-
-          import psycopg
-
-          from scrapers.bronze_ingest import connection_string
-
-          store = os.environ["STORE"]
-          with psycopg.connect(connection_string()) as conn:
-              with conn.cursor() as cur:
-                  cur.execute(
-                      """
-                      SELECT id::text, status, row_count, completed_at
-                        FROM catalog.scrape_runs
-                       WHERE store = %s
-                       ORDER BY started_at DESC
-                       LIMIT 1
-                      """,
-                      (store,),
-                  )
-                  run = cur.fetchone()
-                  if not run:
-                      raise SystemExit(f"No scrape_runs row found for {store}")
-                  run_id, status, row_count, completed_at = run
-                  if status != "completed":
-                      raise SystemExit(f"Latest {store} scrape_run is {status}, expected completed")
-                  if not row_count or row_count <= 0:
-                      raise SystemExit(f"Latest {store} scrape_run has invalid row_count: {row_count}")
-
-                  cur.execute(
-                      """
-                      SELECT
-                        count(*)::int AS total_rows,
-                        count(*) FILTER (
-                          WHERE scrape_run_id IS NOT NULL
-                            AND store IS NOT NULL
-                            AND raw_data IS NOT NULL
-                            AND row_hash IS NOT NULL
-                            AND scraped_at IS NOT NULL
-                        )::int AS required_fields_present,
-                        count(*) FILTER (
-                          WHERE raw_data ? 'store'
-                            AND raw_data ? 'external_id'
-                            AND raw_data ? 'raw'
-                            AND raw_data ? 'scraped_at'
-                        )::int AS envelope_fields_present
-                      FROM catalog.bronze_products
-                      WHERE store = %s
-                      """,
-                      (store,),
-                  )
-                  total_rows, required_fields, envelope_fields = cur.fetchone()
-
-          if total_rows <= 0:
-              raise SystemExit(f"No bronze rows found for {store}")
-          if required_fields != total_rows:
-              raise SystemExit(
-                  f"{store}: required bronze fields present for {required_fields}/{total_rows} rows"
-              )
-          if envelope_fields != total_rows:
-              raise SystemExit(
-                  f"{store}: raw envelope fields present for {envelope_fields}/{total_rows} rows"
-              )
-
-          message = (
-              f"## {store.upper()} bronze validation\n\n"
-              f"- Latest run: `{run_id}`\n"
-              f"- Latest run status: `{status}`\n"
-              f"- Latest run scraped row count: `{row_count}`\n"
-              f"- Store bronze rows: `{total_rows}`\n"
-              f"- Required bronze fields: `{required_fields}/{total_rows}`\n"
-              f"- Raw envelope fields: `{envelope_fields}/{total_rows}`\n"
+              f"- Size: `{size}` bytes\n"
           )
           Path(os.environ["GITHUB_STEP_SUMMARY"]).write_text(message, encoding="utf-8")
           print(message)
           PY
 
-      - name: Refresh silver products
-        shell: bash
-        run: |
-          python - <<'PY'
-          import os
-          from pathlib import Path
-
-          import psycopg
-
-          from scrapers.bronze_ingest import connection_string
-
-          store = os.environ["STORE"]
-          with psycopg.connect(connection_string(), prepare_threshold=None) as conn:
-              with conn.cursor() as cur:
-                  cur.execute("SELECT store_id, rows_refreshed FROM catalog.refresh_silver_products(%s)", (store,))
-                  refreshed = cur.fetchall()
-                  cur.execute(
-                      """
-                      SELECT
-                        count(*)::int AS rows,
-                        count(*) FILTER (WHERE name IS NULL)::int AS missing_name,
-                        count(*) FILTER (WHERE ean IS NULL)::int AS missing_ean,
-                        count(*) FILTER (WHERE price IS NULL)::int AS missing_price,
-                        count(*) FILTER (WHERE image_url IS NULL)::int AS missing_image
-                      FROM catalog.silver_products
-                      WHERE store = %s
-                      """,
-                      (store,),
-                  )
-                  rows, missing_name, missing_ean, missing_price, missing_image = cur.fetchone()
-
-          if not refreshed:
-              raise SystemExit(f"Silver refresh returned no rows for {store}")
-          if rows <= 0:
-              raise SystemExit(f"No silver rows found for {store}")
-
-          refreshed_text = ", ".join(f"{store_id}: {count}" for store_id, count in refreshed)
-          message = (
-              f"## {store.upper()} silver refresh\n\n"
-              f"- Refreshed: `{refreshed_text}`\n"
-              f"- Store silver rows: `{rows}`\n"
-              f"- Missing name: `{missing_name}`\n"
-              f"- Missing EAN: `{missing_ean}`\n"
-              f"- Missing price: `{missing_price}`\n"
-              f"- Missing image URL: `{missing_image}`\n"
-          )
-          with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as summary:
-              summary.write("\n" + message)
-          print(message)
-          PY
-
       - name: Upload bronze JSONL artifact
-        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: bronze-${{ matrix.store }}-${{ github.run_id }}
           path: Output/${{ matrix.store }}_bronze.jsonl
-          if-no-files-found: warn
+          if-no-files-found: error
           retention-days: 14
 
-  promote-and-group:
-    name: Promote + Group Products
-    needs: scrape-and-ingest
+  build-and-sync:
+    name: Build Local Catalog + Sync Hosted
+    needs:
+      - plan
+      - scrape
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 360
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: localdev
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
     env:
-      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      LOCAL_CATALOG_DB_URL: postgresql://postgres:localdev@localhost:5432/postgres
+      STORES_JSON: ${{ needs.plan.outputs.stores }}
+      SELECTED_STORE: ${{ needs.plan.outputs.selected_store }}
+      LIMIT: ${{ inputs.limit || '' }}
+
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -337,66 +213,217 @@ jobs:
           cache: "pip"
           cache-dependency-path: "scrapers/requirements.txt"
 
-      - name: Install database dependency
-        run: python -m pip install -r scrapers/requirements.txt
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client
+          python -m pip install -r scrapers/requirements.txt
 
-      - name: Check required database secret
+      - name: Check hosted database secret
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
         run: |
           if [ -z "$SUPABASE_DB_URL" ]; then
             echo "::error::Missing GitHub secret SUPABASE_DB_URL. Use the Supabase session pooler Postgres URL with sslmode=require."
             exit 1
           fi
 
-      - name: Promote public products and refresh deterministic groups
+      - name: Bootstrap local catalog schema
+        run: psql "$LOCAL_CATALOG_DB_URL" -v ON_ERROR_STOP=1 -f scrapers/local_catalog_schema.sql
+
+      - name: Seed canonical mappings from hosted products
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: python -m scrapers.seed_local_catalog
+
+      - name: Download bronze artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: bronze-*-${{ github.run_id }}
+          path: Output
+          merge-multiple: true
+
+      - name: Ingest bronze and refresh silver locally
+        shell: bash
+        env:
+          SUPABASE_DB_URL: ${{ env.LOCAL_CATALOG_DB_URL }}
+        run: |
+          set -euo pipefail
+          mapfile -t stores < <(python - <<'PY'
+          import json, os
+          for store in json.loads(os.environ["STORES_JSON"]):
+              print(store)
+          PY
+          )
+
+          for store in "${stores[@]}"; do
+            input="Output/${store}_bronze.jsonl"
+            if [ ! -s "$input" ]; then
+              echo "::error::Missing or empty artifact $input"
+              exit 1
+            fi
+
+            python -m scrapers.bronze_ingest --store "$store" --input "$input" --dry-run
+            python -m scrapers.bronze_ingest --store "$store" --input "$input"
+
+            STORE="$store" python - <<'PY'
+            import os
+            import psycopg
+
+            store = os.environ["STORE"]
+            dsn = os.environ["LOCAL_CATALOG_DB_URL"]
+            with psycopg.connect(dsn, prepare_threshold=None) as conn:
+                refreshed = conn.execute(
+                    "SELECT store_id, rows_refreshed FROM catalog.refresh_silver_products(%s)",
+                    (store,),
+                ).fetchall()
+                rows = conn.execute(
+                    """
+                    SELECT count(*)::int,
+                           count(*) FILTER (WHERE name IS NULL)::int,
+                           count(*) FILTER (WHERE price IS NULL)::int,
+                           count(*) FILTER (WHERE image_url IS NULL)::int
+                    FROM catalog.silver_products
+                    WHERE store = %s
+                    """,
+                    (store,),
+                ).fetchone()
+                conn.commit()
+
+            print(f"{store}: refreshed={refreshed} silver_rows={rows[0]} missing_name={rows[1]} missing_price={rows[2]} missing_image={rows[3]}")
+            if not refreshed or rows[0] <= 0 or rows[1] != 0:
+                raise SystemExit(f"{store}: local silver validation failed")
+            PY
+          done
+
+      - name: Promote and group local products
         shell: bash
         run: |
+          set -euo pipefail
+          psql "$LOCAL_CATALOG_DB_URL" -v ON_ERROR_STOP=1 <<'SQL'
+          SELECT * FROM catalog.promote_to_public(NULL);
+          SELECT catalog.refresh_canonical_baseline() AS baseline_rows;
+          SELECT * FROM catalog.apply_canonical_prepass();
+          SELECT catalog.apply_canonical_keys() AS canonical_rows_applied;
+          SQL
+
+      - name: Validate local products
+        shell: bash
+        run: |
+          set -euo pipefail
           python - <<'PY'
           import os
+          import psycopg
           from pathlib import Path
 
-          import psycopg
+          dsn = os.environ["LOCAL_CATALOG_DB_URL"]
+          with psycopg.connect(dsn, prepare_threshold=None) as conn:
+              rows = conn.execute(
+                  """
+                  SELECT
+                    count(*)::int AS products,
+                    count(*) FILTER (WHERE external_id IS NULL)::int AS missing_external_id,
+                    count(*) FILTER (WHERE canonical_key IS NULL)::int AS missing_canonical,
+                    count(DISTINCT canonical_key)::int AS canonical_groups,
+                    (SELECT count(*)::int FROM (
+                      SELECT canonical_key
+                      FROM public.products
+                      WHERE canonical_key IS NOT NULL
+                      GROUP BY canonical_key
+                      HAVING count(DISTINCT store_id) > 1
+                    ) s) AS multistore_groups
+                  FROM public.products
+                  """
+              ).fetchone()
+              cola = conn.execute(
+                  "SELECT store_id, product_name, current_price_cents, canonical_key FROM public.search_product_offers('cola')"
+              ).fetchall()
+              komkommer = conn.execute(
+                  "SELECT store_id, product_name, current_price_cents, canonical_key FROM public.search_product_offers('komkommer')"
+              ).fetchall()
 
-          from scrapers.bronze_ingest import connection_string
-
-          with psycopg.connect(connection_string(), prepare_threshold=None) as conn:
-              with conn.cursor() as cur:
-                  cur.execute("SELECT store_id, rows_upserted FROM catalog.promote_to_public(NULL)")
-                  promoted = cur.fetchall()
-
-                  cur.execute("SELECT step, rows_affected FROM catalog.refresh_exact_ean_groups()")
-                  exact = cur.fetchall()
-
-                  cur.execute("SELECT candidate_kind, candidates_created FROM catalog.generate_rule_group_review_candidates(2000)")
-                  candidates = cur.fetchall()
-
-                  cur.execute(
-                      """
-                      SELECT
-                        (SELECT count(*)::int FROM public.products) AS public_products,
-                        (SELECT count(*)::int FROM public.products WHERE exact_product_group_id IS NOT NULL) AS exact_grouped,
-                        (SELECT count(*)::int FROM public.products WHERE ingredient_id IS NOT NULL) AS substitute_grouped,
-                        (SELECT count(*)::int FROM catalog.group_review_candidates WHERE status = 'pending') AS pending_review
-                      """
-                  )
-                  totals = cur.fetchone()
-              conn.commit()
-
-          promoted_text = ", ".join(f"{store}: {count}" for store, count in promoted) or "none"
-          exact_text = ", ".join(f"{step}: {count}" for step, count in exact) or "none"
-          candidate_text = ", ".join(f"{kind}: {count}" for kind, count in candidates) or "none"
-          public_products, exact_grouped, substitute_grouped, pending_review = totals
+          products, missing_external_id, missing_canonical, groups, multistore = rows
+          if products <= 0 or missing_external_id or missing_canonical:
+              raise SystemExit(f"local products invalid: {rows}")
+          if not cola or {r[3] for r in cola} != {"cola"}:
+              raise SystemExit(f"cola offer group did not resolve to canonical_key=cola: {cola}")
 
           message = (
-              "## Catalog promotion + grouping\n\n"
-              f"- Promoted: `{promoted_text}`\n"
-              f"- Exact/EAN refresh: `{exact_text}`\n"
-              f"- Review candidates generated: `{candidate_text}`\n"
-              f"- Public products: `{public_products}`\n"
-              f"- Exact grouped products: `{exact_grouped}`\n"
-              f"- Substitute grouped products: `{substitute_grouped}`\n"
-              f"- Pending review candidates: `{pending_review}`\n"
+              "## Local catalog validation\n\n"
+              f"- Products: `{products}`\n"
+              f"- Missing external_id: `{missing_external_id}`\n"
+              f"- Missing canonical_key: `{missing_canonical}`\n"
+              f"- Canonical groups: `{groups}`\n"
+              f"- Multi-store groups: `{multistore}`\n"
+              f"- Cola offers: `{len(cola)}` rows, keys `{sorted({r[3] for r in cola})}`\n"
+              f"- Komkommer offers: `{len(komkommer)}` rows, keys `{sorted({r[3] for r in komkommer})}`\n"
           )
-          Path("catalog-promotion-summary.md").write_text(message, encoding="utf-8")
           Path(os.environ["GITHUB_STEP_SUMMARY"]).write_text(message, encoding="utf-8")
           print(message)
+          PY
+
+      - name: Sync hosted products
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=()
+          if [ "$SELECTED_STORE" != "all" ]; then
+            args+=(--store "$SELECTED_STORE")
+          fi
+
+          python -m scrapers.sync_products --dry-run "${args[@]}"
+
+          if [ -n "$LIMIT" ]; then
+            echo "Limited smoke run detected; skipping hosted sync."
+            exit 0
+          fi
+
+          python -m scrapers.sync_products "${args[@]}"
+
+      - name: Verify hosted products
+        if: ${{ inputs.limit == '' || inputs.limit == null }}
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os
+          import psycopg
+
+          dsn = os.environ["SUPABASE_DB_URL"]
+          if "sslmode=" not in dsn:
+              dsn += ("&" if "?" in dsn else "?") + "sslmode=require"
+
+          with psycopg.connect(dsn, prepare_threshold=None) as conn:
+              counts = conn.execute(
+                  """
+                  SELECT
+                    pg_size_pretty(pg_database_size(current_database())),
+                    (SELECT count(*)::int FROM public.products),
+                    (SELECT count(*)::int FROM information_schema.schemata WHERE schema_name='catalog'),
+                    (SELECT count(*)::int FROM public.products WHERE external_id IS NULL),
+                    (SELECT count(*)::int FROM public.products WHERE canonical_key IS NULL),
+                    (SELECT count(DISTINCT canonical_key)::int FROM public.products)
+                  """
+              ).fetchone()
+              cola = conn.execute(
+                  "SELECT store_id, product_name, current_price_cents, canonical_key FROM public.search_product_offers('cola')"
+              ).fetchall()
+
+          if counts[2] != 0 or counts[3] != 0 or counts[4] != 0:
+              raise SystemExit(f"hosted verification failed: {counts}")
+          if not cola or {r[3] for r in cola} != {"cola"}:
+              raise SystemExit(f"hosted cola offer group did not resolve to canonical_key=cola: {cola}")
+
+          print(
+              "hosted verification: "
+              f"db_size={counts[0]} products={counts[1]} catalog_schema={counts[2]} "
+              f"missing_external_id={counts[3]} missing_canonical_key={counts[4]} "
+              f"canonical_groups={counts[5]} cola_rows={len(cola)}"
+          )
           PY

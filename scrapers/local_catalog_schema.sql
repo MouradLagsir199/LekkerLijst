@@ -887,7 +887,28 @@ RETURNS TABLE (
 LANGUAGE sql
 STABLE
 AS $$
-  WITH ranked AS (
+  WITH params AS (
+    SELECT regexp_replace(
+             regexp_replace(
+               btrim(regexp_replace(public.fold_text(coalesce(query_text, '')), '[^[:alnum:] ]+', ' ', 'g')),
+               '\s+', '_', 'g'
+             ),
+             '^_+|_+$', '', 'g'
+           ) AS qkey
+  ),
+  exact AS (
+    SELECT
+      p.canonical_key,
+      1.0::numeric AS grp_score,
+      count(*) AS hits,
+      count(DISTINCT p.store_id) AS stores
+    FROM public.products p, params
+    WHERE p.is_available = true
+      AND coalesce(p.canonical_key, '') <> ''
+      AND p.canonical_key = params.qkey
+    GROUP BY p.canonical_key
+  ),
+  ranked AS (
     SELECT s.match_score, p.canonical_key
     FROM public.search_products(query_text, NULL, greatest(coalesce(match_count, 8), 12)) s
     JOIN public.products p ON p.id = s.product_id
@@ -906,9 +927,16 @@ AS $$
   ),
   best AS (
     SELECT canonical_key, grp_score
-    FROM cand
-    WHERE grp_score >= (SELECT max(grp_score) FROM cand) - 0.06
-    ORDER BY stores DESC, grp_score DESC, hits DESC, canonical_key
+    FROM (
+      SELECT 0 AS priority, canonical_key, grp_score, hits, stores
+      FROM exact
+      UNION ALL
+      SELECT 1 AS priority, canonical_key, grp_score, hits, stores
+      FROM cand
+      WHERE NOT EXISTS (SELECT 1 FROM exact)
+        AND grp_score >= (SELECT max(grp_score) FROM cand) - 0.06
+    ) choice
+    ORDER BY priority, stores DESC, grp_score DESC, hits DESC, canonical_key
     LIMIT 1
   ),
   offers AS (

@@ -112,3 +112,26 @@ select * from public.search_product_offers('komkommer');
 ```
 
 Only after those checks pass should hosted `catalog` be dropped.
+
+## GitHub Actions
+
+The daily workflow is `.github/workflows/catalog-bronze-ingest.yml`
+(`Catalog Local Rebuild`). It does not write bronze/silver data to hosted
+Supabase. Instead it:
+
+1. Runs scraper jobs that upload `Output/*_bronze.jsonl` artifacts.
+2. Starts a temporary PostgreSQL service inside GitHub Actions.
+3. Applies `scrapers/local_catalog_schema.sql`.
+4. Seeds local `catalog.name_canonical` from hosted `public.products`, preserving
+   prior AI/manual grouping decisions after hosted `catalog` was removed.
+5. Ingests bronze, refreshes silver, promotes local `public.products`, applies
+   canonical keys, validates `cola` and `komkommer` offer groups, then syncs only
+   local `public.products` to hosted.
+
+Workflow-dispatch runs with `limit` are smoke tests and intentionally skip hosted
+sync so a partial scrape cannot deactivate real products.
+
+The manual `.github/workflows/catalog-canonical-tag.yml` workflow is for future
+AI recanon maintenance. It seeds a local catalog from hosted `public.products`,
+runs the OpenAI batch locally, and syncs public products back only after loading
+completed remaps.
