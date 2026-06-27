@@ -518,7 +518,7 @@ BEGIN
     FROM catalog.silver_products sp
     WHERE sp.name IS NOT NULL
       AND (store_filter IS NULL OR sp.store = store_filter)
-    ON CONFLICT (store_id, external_id) DO UPDATE SET
+    ON CONFLICT ON CONSTRAINT products_store_id_external_id_key DO UPDATE SET
       silver_product_id     = EXCLUDED.silver_product_id,
       name                  = EXCLUDED.name,
       ean                   = EXCLUDED.ean,

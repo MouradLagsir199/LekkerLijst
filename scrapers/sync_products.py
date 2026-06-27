@@ -128,7 +128,10 @@ def sync_products(*, store: str | None, limit: int | None, dry_run: bool, deacti
             upserted = 0
 
             with hosted_conn.cursor() as cur:
-                cur.execute("CREATE TEMP TABLE sync_product_keys (store_id text, external_id text) ON COMMIT DROP")
+                cur.execute(
+                    "CREATE TEMP TABLE sync_product_keys (store_id text, external_id text) "
+                    "ON COMMIT PRESERVE ROWS"
+                )
 
             placeholders = ", ".join(["%s"] * len(PRODUCT_COLUMNS))
             update_cols = [c for c in PRODUCT_COLUMNS if c not in ("store_id", "external_id")]
