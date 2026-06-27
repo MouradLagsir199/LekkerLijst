@@ -947,7 +947,7 @@ AS $$
   WITH self AS (
     SELECT canonical_key AS k FROM public.products WHERE id = p_product_id
   )
-  SELECT DISTINCT ON (p.store_id)
+  SELECT
     p.id, p.store_id, p.name, p.brand, p.package_size_text,
     p.current_price_cents, p.unit_price_cents, p.unit_price_unit,
     p.image_url, p.product_url, p.canonical_key
@@ -955,7 +955,13 @@ AS $$
   WHERE p.is_available = true
     AND p.canonical_key = self.k
     AND coalesce(self.k, '') <> ''
-  ORDER BY p.store_id, p.current_price_cents ASC NULLS LAST, p.name;
+    AND (p.current_price_cents IS NULL OR p.current_price_cents > 0)
+  ORDER BY
+    (p.current_price_cents IS NULL) ASC,
+    p.current_price_cents ASC NULLS LAST,
+    p.unit_price_cents ASC NULLS LAST,
+    p.store_id,
+    p.name;
 $$;
 
 CREATE OR REPLACE FUNCTION public.search_product_offers(query_text text, match_count integer DEFAULT 8)
@@ -1051,19 +1057,11 @@ AS $$
     LIMIT 1
   ),
   offers AS (
-    SELECT DISTINCT ON (p.store_id)
+    SELECT
       p.id, p.store_id, p.name, p.brand, p.category, p.package_size_text,
       p.current_price_cents, p.unit_price_cents, p.unit_price_unit,
       p.image_url, p.product_url,
-      b.grp_score AS match_score, p.canonical_key, p.canonical_name
-    FROM public.products p
-    JOIN best b ON b.canonical_key = p.canonical_key
-    CROSS JOIN params
-    WHERE p.is_available = true
-      AND (p.current_price_cents IS NULL OR p.current_price_cents > 0)
-    ORDER BY
-      p.store_id,
-      (p.current_price_cents IS NULL) ASC,
+      b.grp_score AS match_score, p.canonical_key, p.canonical_name,
       CASE
         WHEN params.qfold <> '' AND public.fold_text(p.name) = params.qfold THEN 4
         WHEN params.qfold <> '' AND public.fold_text(p.name) LIKE '%' || params.qfold || '%' THEN 3
@@ -1081,15 +1079,23 @@ AS $$
              AND public.fold_text(p.name) LIKE '%' || token || '%'
          ) THEN 1
         ELSE 0
-      END DESC,
-      p.current_price_cents ASC NULLS LAST,
-      p.unit_price_cents ASC NULLS LAST,
-      p.name
+      END AS offer_rank
+    FROM public.products p
+    JOIN best b ON b.canonical_key = p.canonical_key
+    CROSS JOIN params
+    WHERE p.is_available = true
+      AND (p.current_price_cents IS NULL OR p.current_price_cents > 0)
   )
   SELECT
     o.id, o.store_id, o.name, o.brand, o.category, o.package_size_text,
     o.current_price_cents, o.unit_price_cents, o.unit_price_unit,
     o.image_url, o.product_url, o.match_score, o.canonical_key, o.canonical_name
   FROM offers o
-  ORDER BY o.current_price_cents ASC NULLS LAST, o.store_id;
+  ORDER BY
+    o.offer_rank DESC,
+    (o.current_price_cents IS NULL) ASC,
+    o.current_price_cents ASC NULLS LAST,
+    o.unit_price_cents ASC NULLS LAST,
+    o.store_id,
+    o.name;
 $$;
