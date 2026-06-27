@@ -63,7 +63,7 @@ jobs:
       LIMIT: ${{ inputs.limit }}
       WAIT_AFTER_SUBMIT: ${{ inputs.wait_after_submit || 'false' }}
       INTERVAL: ${{ inputs.interval || '60' }}
-      LOCAL_CATALOG_DB_URL: postgresql://postgres:localdev@localhost:5432/postgres
+      LOCAL_CATALOG_DB_URL: postgresql://postgres:localdev@localhost:5432/postgres?sslmode=disable
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       OPENAI_CATALOG_MODEL: ${{ secrets.OPENAI_CATALOG_MODEL }}
       GH_TOKEN: ${{ github.token }}

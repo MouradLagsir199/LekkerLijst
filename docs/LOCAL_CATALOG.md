@@ -11,7 +11,7 @@ This machine is currently using a direct PostgreSQL install on port `54322`:
 winget install --id PostgreSQL.PostgreSQL.16 -e
 winget install --id PostgreSQL.PostgreSQL.17 -e # tools for dumping hosted PG17
 
-$env:LOCAL_CATALOG_DB_URL = "postgresql://postgres@localhost:54322/postgres"
+$env:LOCAL_CATALOG_DB_URL = "postgresql://postgres@localhost:54322/postgres?sslmode=disable"
 
 & "C:\Program Files\PostgreSQL\16\bin\pg_ctl.exe" status `
   -D "$env:LOCALAPPDATA\LekkerLijst\postgres16-data"
@@ -25,7 +25,7 @@ docker run --name lekkerlijst-catalog-postgres `
   -p 54322:5432 `
   -d postgres:16
 
-$env:LOCAL_CATALOG_DB_URL = "postgresql://postgres:localdev@localhost:54322/postgres"
+$env:LOCAL_CATALOG_DB_URL = "postgresql://postgres:localdev@localhost:54322/postgres?sslmode=disable"
 ```
 
 ## 2. Bootstrap schema
@@ -97,7 +97,7 @@ Apply `supabase/migrations/202606270002_prepare_catalog_decouple.sql` first.
 Then:
 
 ```powershell
-$env:LOCAL_CATALOG_DB_URL = "postgresql://postgres:localdev@localhost:54322/postgres"
+$env:LOCAL_CATALOG_DB_URL = "postgresql://postgres:localdev@localhost:54322/postgres?sslmode=disable"
 $env:SUPABASE_DB_URL = "<hosted pooler connection string>"
 
 .venv\Scripts\python.exe -m scrapers.sync_products --dry-run

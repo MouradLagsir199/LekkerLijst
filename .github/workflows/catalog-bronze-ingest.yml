@@ -197,7 +197,7 @@ jobs:
           --health-retries 5
 
     env:
-      LOCAL_CATALOG_DB_URL: postgresql://postgres:localdev@localhost:5432/postgres
+      LOCAL_CATALOG_DB_URL: postgresql://postgres:localdev@localhost:5432/postgres?sslmode=disable
       STORES_JSON: ${{ needs.plan.outputs.stores }}
       SELECTED_STORE: ${{ needs.plan.outputs.selected_store }}
       LIMIT: ${{ inputs.limit || '' }}
