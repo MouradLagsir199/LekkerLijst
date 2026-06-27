@@ -574,6 +574,85 @@ AS $$
   SELECT public.fold_text(coalesce(txt, '')) ~ '\m(bio|biologisch|biologische|organic)\M';
 $$;
 
+CREATE OR REPLACE FUNCTION catalog.normalize_canonical_key(raw_key text, product_name text DEFAULT NULL)
+RETURNS text
+LANGUAGE sql
+IMMUTABLE
+AS $$
+  WITH base AS (
+    SELECT
+      regexp_replace(
+        regexp_replace(public.fold_text(coalesce(raw_key, '')), '[^[:alnum:]]+', '_', 'g'),
+        '^_+|_+$',
+        '',
+        'g'
+      ) AS k,
+      public.fold_text(coalesce(product_name, '')) AS n
+  )
+  SELECT CASE
+    WHEN k IN (
+      'coca_cola', 'coca_cola_regular', 'cola_original_taste',
+      'cola_regular', 'cola_regulier', 'cola_regular_frisdrank',
+      'pepsi_cola'
+    ) THEN 'cola'
+    WHEN k IN (
+      'coca_cola_zero', 'cola_zero_frisdrank', 'cola_zero_sugar',
+      'cola_zero_suiker'
+    ) THEN 'cola_zero'
+    WHEN k IN ('cola_cherry', 'cola_kers_frisdrank') THEN 'cola_kers'
+    WHEN k IN ('cola_zero_cherry', 'cola_zero_kers_frisdrank') THEN 'cola_zero_kers'
+    WHEN k = 'cola_vanilla' THEN 'cola_vanille'
+    WHEN k IN ('tarwebloem', 'patentbloem') THEN 'bloem'
+    WHEN k = 'banaan'
+      AND n ~ '\m(olvarit|baby|maaza|yo to go|yoghurt|kwark|drink|drank|milk|melk|smoothie|pap|knijpfruit|danoontje|alpro|brinta|muller|müller|breaker|proteine|proteïne|ijs|chips|smaak)\M'
+      THEN 'banaan_smaak'
+    WHEN k IN (
+      'paprika_geel', 'paprika_rood', 'rode_paprika',
+      'paprika_mix', 'paprikamix', 'paprika_duo'
+    ) THEN 'paprika'
+    WHEN k = 'paprika'
+      AND n ~ '\m(euroma|essential|paprikapoeder|poeder|kruiden|chips|heartbreakers|pringles|lays|wokkels|tuc|doritos|snack|borrel|saus|spread|roomkaas|focaccia|tortilla)\M'
+      THEN 'paprika_smaak'
+    WHEN k IN ('tomaten', 'trostomaten', 'trostomaat', 'cherrytomaten') THEN 'tomaat'
+    WHEN k IN (
+      'aardappelen', 'aardappel_kruimig', 'iets_kruimige_aardappelen',
+      'vastkokende_aardappelen', 'kruimige_aardappelen'
+    ) THEN 'aardappel'
+    WHEN k IN ('uien', 'gele_uien', 'uien_geel') THEN 'ui'
+    WHEN k IN (
+      'goudse_kaas_jong', 'goudse_kaas_jong_48_plus',
+      'goudse_kaas_jong_48_plus_plakken', 'goudse_kaas_mild'
+    ) THEN 'jonge_kaas'
+    WHEN k = 'kaas' AND n LIKE '%kaas 48%' THEN 'jonge_kaas'
+    ELSE k
+  END
+  FROM base;
+$$;
+
+CREATE OR REPLACE FUNCTION catalog.canonical_display_name(normalized_key text, fallback text DEFAULT NULL)
+RETURNS text
+LANGUAGE sql
+IMMUTABLE
+AS $$
+  SELECT CASE normalized_key
+    WHEN 'cola' THEN 'Cola'
+    WHEN 'cola_zero' THEN 'Cola zero'
+    WHEN 'cola_kers' THEN 'Cola kers'
+    WHEN 'cola_zero_kers' THEN 'Cola zero kers'
+    WHEN 'cola_vanille' THEN 'Cola vanille'
+    WHEN 'bloem' THEN 'Bloem'
+    WHEN 'banaan' THEN 'Banaan'
+    WHEN 'banaan_smaak' THEN 'Banaan smaak'
+    WHEN 'paprika' THEN 'Paprika'
+    WHEN 'paprika_smaak' THEN 'Paprika smaak'
+    WHEN 'tomaat' THEN 'Tomaat'
+    WHEN 'aardappel' THEN 'Aardappel'
+    WHEN 'ui' THEN 'Ui'
+    WHEN 'jonge_kaas' THEN 'Jonge kaas'
+    ELSE NULLIF(btrim(fallback), '')
+  END;
+$$;
+
 CREATE OR REPLACE FUNCTION catalog.refresh_canonical_baseline()
 RETURNS bigint
 LANGUAGE plpgsql
@@ -584,7 +663,7 @@ BEGIN
   INSERT INTO catalog.name_canonical (name_search, canonical_key, is_organic, source)
   SELECT DISTINCT
     p.name_search,
-    catalog.canonical_key(p.name_search),
+    catalog.normalize_canonical_key(catalog.canonical_key(p.name_search), p.name),
     catalog.name_is_organic(p.name_search),
     'rule'
   FROM public.products p
@@ -609,15 +688,27 @@ AS $$
 DECLARE
   n bigint;
 BEGIN
+  WITH mapped AS (
+    SELECT
+      p.id,
+      catalog.normalize_canonical_key(nc.canonical_key, p.name) AS canonical_key,
+      catalog.canonical_display_name(
+        catalog.normalize_canonical_key(nc.canonical_key, p.name),
+        nc.display_name
+      ) AS canonical_name,
+      nc.is_organic
+    FROM public.products p
+    JOIN catalog.name_canonical nc ON nc.name_search = p.name_search
+  )
   UPDATE public.products p
-  SET canonical_key  = nc.canonical_key,
-      canonical_name = nc.display_name,
-      is_organic     = nc.is_organic
-  FROM catalog.name_canonical nc
-  WHERE nc.name_search = p.name_search
-    AND (p.canonical_key  IS DISTINCT FROM nc.canonical_key
-      OR p.canonical_name IS DISTINCT FROM nc.display_name
-      OR p.is_organic     IS DISTINCT FROM nc.is_organic);
+  SET canonical_key  = mapped.canonical_key,
+      canonical_name = mapped.canonical_name,
+      is_organic     = mapped.is_organic
+  FROM mapped
+  WHERE mapped.id = p.id
+    AND (p.canonical_key  IS DISTINCT FROM mapped.canonical_key
+      OR p.canonical_name IS DISTINCT FROM mapped.canonical_name
+      OR p.is_organic     IS DISTINCT FROM mapped.is_organic);
 
   GET DIAGNOSTICS n = ROW_COUNT;
   RETURN n;
@@ -887,14 +978,34 @@ RETURNS TABLE (
 LANGUAGE sql
 STABLE
 AS $$
-  WITH params AS (
-    SELECT regexp_replace(
+  WITH params_raw AS (
+    SELECT
+           btrim(regexp_replace(public.fold_text(coalesce(query_text, '')), '[^[:alnum:] ]+', ' ', 'g')) AS qfold,
+           regexp_split_to_array(
+             btrim(regexp_replace(public.fold_text(coalesce(query_text, '')), '[^[:alnum:] ]+', ' ', 'g')),
+             '\s+'
+           ) AS qtokens,
+           regexp_replace(
              regexp_replace(
                btrim(regexp_replace(public.fold_text(coalesce(query_text, '')), '[^[:alnum:] ]+', ' ', 'g')),
                '\s+', '_', 'g'
              ),
              '^_+|_+$', '', 'g'
-           ) AS qkey
+           ) AS raw_qkey
+  ),
+  params AS (
+    SELECT
+      qfold,
+      qtokens,
+      CASE raw_qkey
+        WHEN 'melk' THEN 'halfvolle_melk'
+        WHEN 'yoghurt' THEN 'halfvolle_yoghurt'
+        WHEN 'rijst' THEN 'zilvervliesrijst'
+        WHEN 'koffie' THEN 'filterkoffie'
+        WHEN 'kaas' THEN 'jonge_kaas'
+        ELSE raw_qkey
+      END AS qkey
+    FROM params_raw
   ),
   exact AS (
     SELECT
@@ -947,8 +1058,33 @@ AS $$
       b.grp_score AS match_score, p.canonical_key, p.canonical_name
     FROM public.products p
     JOIN best b ON b.canonical_key = p.canonical_key
+    CROSS JOIN params
     WHERE p.is_available = true
-    ORDER BY p.store_id, p.current_price_cents ASC NULLS LAST, p.name
+      AND (p.current_price_cents IS NULL OR p.current_price_cents > 0)
+    ORDER BY
+      p.store_id,
+      (p.current_price_cents IS NULL) ASC,
+      CASE
+        WHEN params.qfold <> '' AND public.fold_text(p.name) = params.qfold THEN 4
+        WHEN params.qfold <> '' AND public.fold_text(p.name) LIKE '%' || params.qfold || '%' THEN 3
+        WHEN coalesce(array_length(params.qtokens, 1), 0) > 0
+         AND NOT EXISTS (
+           SELECT 1
+           FROM unnest(params.qtokens) token
+           WHERE token <> ''
+             AND public.fold_text(p.name) NOT LIKE '%' || token || '%'
+         ) THEN 2
+        WHEN EXISTS (
+           SELECT 1
+           FROM unnest(params.qtokens) token
+           WHERE token <> ''
+             AND public.fold_text(p.name) LIKE '%' || token || '%'
+         ) THEN 1
+        ELSE 0
+      END DESC,
+      p.current_price_cents ASC NULLS LAST,
+      p.unit_price_cents ASC NULLS LAST,
+      p.name
   )
   SELECT
     o.id, o.store_id, o.name, o.brand, o.category, o.package_size_text,
