@@ -5,6 +5,20 @@ This keeps hosted Supabase lean: build catalog data locally, then sync only
 
 ## 1. Start local Postgres
 
+This machine is currently using a direct PostgreSQL install on port `54322`:
+
+```powershell
+winget install --id PostgreSQL.PostgreSQL.16 -e
+winget install --id PostgreSQL.PostgreSQL.17 -e # tools for dumping hosted PG17
+
+$env:LOCAL_CATALOG_DB_URL = "postgresql://postgres@localhost:54322/postgres"
+
+& "C:\Program Files\PostgreSQL\16\bin\pg_ctl.exe" status `
+  -D "$env:LOCALAPPDATA\LekkerLijst\postgres16-data"
+```
+
+Docker is also fine for a fresh local database:
+
 ```powershell
 docker run --name lekkerlijst-catalog-postgres `
   -e POSTGRES_PASSWORD=localdev `
@@ -40,6 +54,9 @@ pg_dump $env:SUPABASE_DB_URL `
 psql $env:LOCAL_CATALOG_DB_URL -f Output/catalog_seed.sql
 ```
 
+If a PG17 dump is restored into PG16 and fails on `SET transaction_timeout`,
+remove that one line from the dump and restore the filtered file.
+
 ## 4. Rebuild local app products
 
 ```powershell
@@ -70,6 +87,9 @@ $env:SUPABASE_DB_URL = $env:LOCAL_CATALOG_DB_URL
 ```
 
 Remove `--limit` for the full targeted recanon pass after the pilot looks sane.
+If submission fails with `billing_hard_limit_reached`, raise the OpenAI project
+billing limit or use a key from an org with available spend, then rerun
+`submit-chunks`.
 
 ## 6. Sync hosted products
 

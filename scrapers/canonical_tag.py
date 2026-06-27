@@ -210,6 +210,23 @@ def api_key() -> str:
     return k
 
 
+def raise_for_openai(resp: httpx.Response, action: str) -> None:
+    if resp.is_success:
+        return
+    code = None
+    message = resp.text[:500]
+    try:
+        error = resp.json().get("error") or {}
+        code = error.get("code")
+        message = error.get("message") or message
+    except ValueError:
+        pass
+    detail = f"OpenAI {action} failed ({resp.status_code})"
+    if code:
+        detail += f" [{code}]"
+    sys.exit(f"{detail}: {message}")
+
+
 def request_body(sample_name: str) -> dict:
     return {
         "model": model_name(),
@@ -563,17 +580,18 @@ def cmd_submit_chunks(args):
                 data={"purpose": "batch"},
                 files=files,
             )
-            up.raise_for_status()
+            raise_for_openai(up, "file upload")
             file_id = up.json()["id"]
+            item.update({"input_file_id": file_id, "status": "uploaded", "uploaded_at": now_iso()})
+            save_manifest(manifest)
             batch = client.post(
                 f"{OPENAI_BASE}/batches",
                 headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
                 json={"input_file_id": file_id, "endpoint": "/v1/responses", "completion_window": "24h"},
             )
-            batch.raise_for_status()
+            raise_for_openai(batch, "batch create")
             b = batch.json()
             item.update({
-                "input_file_id": file_id,
                 "batch_id": b["id"],
                 "status": b["status"],
                 "submitted_at": now_iso(),
@@ -696,14 +714,14 @@ def cmd_submit(args):
         files = {"file": (REQUESTS_PATH.name, REQUESTS_PATH.read_bytes(), "application/jsonl")}
         up = client.post(f"{OPENAI_BASE}/files", headers={"Authorization": f"Bearer {key}"},
                          data={"purpose": "batch"}, files=files)
-        up.raise_for_status()
+        raise_for_openai(up, "file upload")
         file_id = up.json()["id"]
         print(f"uploaded input file: {file_id}")
         batch = client.post(f"{OPENAI_BASE}/batches",
                             headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
                             json={"input_file_id": file_id, "endpoint": "/v1/responses",
                                   "completion_window": "24h"})
-        batch.raise_for_status()
+        raise_for_openai(batch, "batch create")
         b = batch.json()
         print(f"batch id: {b['id']}   status: {b['status']}")
 
