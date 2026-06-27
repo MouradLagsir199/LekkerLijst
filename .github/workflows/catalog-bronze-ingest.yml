@@ -308,6 +308,7 @@ jobs:
           from pathlib import Path
 
           dsn = os.environ["LOCAL_CATALOG_DB_URL"]
+          is_full_all = not os.environ.get("LIMIT") and os.environ.get("SELECTED_STORE") == "all"
           with psycopg.connect(dsn, prepare_threshold=None) as conn:
               rows = conn.execute(
                   """
@@ -336,7 +337,7 @@ jobs:
           products, missing_external_id, missing_canonical, groups, multistore = rows
           if products <= 0 or missing_external_id or missing_canonical:
               raise SystemExit(f"local products invalid: {rows}")
-          if not cola or {r[3] for r in cola} != {"cola"}:
+          if is_full_all and (not cola or {r[3] for r in cola} != {"cola"}):
               raise SystemExit(f"cola offer group did not resolve to canonical_key=cola: {cola}")
 
           message = (
@@ -348,6 +349,7 @@ jobs:
               f"- Multi-store groups: `{multistore}`\n"
               f"- Cola offers: `{len(cola)}` rows, keys `{sorted({r[3] for r in cola})}`\n"
               f"- Komkommer offers: `{len(komkommer)}` rows, keys `{sorted({r[3] for r in komkommer})}`\n"
+              f"- Strict offer assertions: `{'enabled' if is_full_all else 'skipped for partial/single-store run'}`\n"
           )
           Path(os.environ["GITHUB_STEP_SUMMARY"]).write_text(message, encoding="utf-8")
           print(message)
